@@ -1,0 +1,23 @@
+{
+  "name": "chrono-shi-xu",
+  "version": "1.5.2",
+  "private": true,
+  "description": "时序 Chrono · 本地优先的个人时间调度",
+  "scripts": {
+    "test": "node tests/engine.test.js && node tests/ui-smoke.js && node tests/llm.test.js && node tests/sync.test.js && node tests/holiday.test.js && node tests/routine.test.js && node tests/agent.test.js && node tests/lock.test.js && node tests/overlap.test.js && node tests/pair.test.js && node tests/longterm.test.js && node tests/cloud.test.js && node tests/remote.test.js",
+    "serve": "node tools/server.js",
+    "www": "node tools/make_www.js",
+    "single": "python3 tools/build_single.py",
+    "ios:add": "npm i @capacitor/core @capacitor/cli @capacitor/ios @capacitor/local-notifications && npx cap add ios",
+    "ios:sync": "npm run www && npx cap sync ios && npx cap open ios",
+    "android:add": "npm i @capacitor/android && npx cap add android",
+    "android:sync": "npm run www && npx cap sync android && npx cap open android",
+    "deploy": "node tools/make_deploy.js",
+    "icons": "python3 tools/make_icons.py",
+    "desktop": "cd desktop && npm install && npm run dist"
+  },
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=18"
+  }
+}

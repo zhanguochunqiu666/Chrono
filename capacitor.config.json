@@ -1,0 +1,7 @@
+{
+  "appId": "com.chrono.shixu",
+  "appName": "时序",
+  "webDir": "www",
+  "ios": { "contentInset": "always" },
+  "server": { "androidScheme": "https" }
+}

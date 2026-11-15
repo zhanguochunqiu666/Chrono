@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>时序 · 管理后台</title>
+<style>
+:root{color-scheme:light dark;--bg:#eef1f7;--card:#fff;--ink:#141a24;--mut:#5b6677;--line:#dfe4ee;--pri:#2f4bf2;--bad:#c0392b;--ok:#1e8a3c}
+@media(prefers-color-scheme:dark){:root{--bg:#0c111b;--card:#171e2c;--ink:#eef2f8;--mut:#9aa6ba;--line:#26304a;--pri:#8ea0ff;--bad:#ff7b6b;--ok:#5fd97c}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,"PingFang SC","Microsoft YaHei UI",system-ui,sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:14px 20px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+header b{font-size:17px}nav{display:flex;gap:6px;flex:1}nav button{border:0;background:none;color:var(--mut);padding:7px 14px;border-radius:999px;font:inherit;cursor:pointer}nav button.on{background:var(--pri);color:#fff}
+main{max-width:980px;margin:0 auto;padding:20px}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px}
+h2{margin:0 0 12px;font-size:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.stat{background:var(--bg);border-radius:12px;padding:12px}.stat b{display:block;font-size:26px}.stat span{color:var(--mut);font-size:13px}
+input,select,textarea,button.b{font:inherit;color:inherit}input,select,textarea{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 10px;width:100%}
+label{display:block;color:var(--mut);font-size:13px;margin:10px 0 4px}.row{display:flex;gap:10px;align-items:end;flex-wrap:wrap}.row>*{flex:1;min-width:120px}
+button.b{border:1px solid var(--line);background:var(--card);border-radius:10px;padding:8px 14px;cursor:pointer}button.b.p{background:var(--pri);border-color:var(--pri);color:#fff}button.b.d{color:var(--bad)}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--mut);font-weight:500}
+.tag{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;background:var(--bg)}.tag.active{color:var(--ok)}.tag.revoked,.tag.expired{color:var(--bad)}
+code{font-family:ui-monospace,Consolas,monospace}.sw{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}.sw input{width:20px;height:20px}.sw div{flex:1}.sw small{color:var(--mut);display:block}
+#login{max-width:380px;margin:12vh auto}#msg{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:12px;opacity:0;transition:.2s;pointer-events:none}#msg.show{opacity:1}
+</style></head><body>
+<div id="app"></div><div id="msg"></div>
+<script>
+(function () {
+  'use strict';
+  const $app = document.getElementById('app'), $msg = document.getElementById('msg');
+  const K = 'chrono.admin.token'; let token = sessionStorage.getItem(K) || '', tab = 'stats', cache = {};
+  const el = (tag, props, ...kids) => { const e = document.createElement(tag); Object.entries(props || {}).forEach(([k, v]) => { if (k === 'class') e.className = v; else if (k.startsWith('on')) e.addEventListener(k.slice(2), v); else if (k === 'text') e.textContent = v; else e.setAttribute(k, v); }); kids.flat().forEach((c) => c != null && e.append(c.nodeType ? c : document.createTextNode(String(c)))); return e; };
+  const toast = (t) => { $msg.textContent = t; $msg.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => $msg.classList.remove('show'), 2600); };
+  const fmt = (t) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '—');
+  async function api(path, method, body) {
+    const r = await fetch('/api/admin/' + path, { method: method || 'GET', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    if (r.status === 401) { sessionStorage.removeItem(K); token = ''; render(); throw new Error('登录已失效或口令不对'); }
+    const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || r.status); return j;
+  }
+  const guard = (f) => async (...a) => { try { await f(...a); } catch (e) { toast(e.message); } };
+
+  function login() {
+    const inp = el('input', { type: 'password', placeholder: '管理员口令(ADMIN_TOKEN)', autocomplete: 'off' });
+    const go = guard(async () => { token = inp.value.trim(); if (!token) return; await api('stats'); sessionStorage.setItem(K, token); render(); });
+    inp.addEventListener('keydown', (e) => e.key === 'Enter' && go());
+    return el('div', { id: 'login', class: 'card' }, el('h2', { text: '时序 · 管理后台' }), el('p', { text: '请输入你在 Cloudflare 里设置的管理员口令。', style: 'color:var(--mut)' }), inp, el('div', { style: 'margin-top:12px' }, el('button', { class: 'b p', onclick: go, text: '登录' })));
+  }
+
+  async function viewStats() {
+    const s = await api('stats'); cache.cfg = s.config;
+    const st = (n, l) => el('div', { class: 'stat' }, el('b', { text: n }), el('span', { text: l }));
+    return el('div', {}, el('div', { class: 'card' }, el('h2', { text: '概览' }), el('div', { class: 'grid' }, st(s.licenses, '授权码总数'), st(s.active, '有效'), st(s.expiringIn7d, '7 天内到期'), st(s.devices, '已登记设备'), st(s.syncRooms, '同步房间数'))),
+      el('div', { class: 'card' }, el('h2', { text: '当前状态' }), el('p', { text: '维护模式:' + (s.config.maintenance ? '开启' : '关闭') + ' · 要求授权码:' + (s.config.requireLicense ? '是' : '否') + ' · 托管 AI 代理:' + (s.config.aiProxy === false ? '关闭' : '开启') + ' · 最低版本:' + (s.config.minVersion || '不限') })),
+      el('p', { text: '说明:这里只统计数量,看不到任何用户的日程内容(同步数据是端到端加密的)。', style: 'color:var(--mut);font-size:13px' }));
+  }
+
+  async function viewLic() {
+    const { licenses } = await api('licenses');
+    const plan = el('select', {}, el('option', { value: 'pro', text: 'pro(付费)' }), el('option', { value: 'free', text: 'free' })), days = el('input', { type: 'number', min: '0', placeholder: '有效天数,0=永久', value: '365' }), dev = el('input', { type: 'number', min: '1', max: '20', value: '3' }), count = el('input', { type: 'number', min: '1', max: '100', value: '1' }), note = el('input', { placeholder: '备注(例如:买家、渠道)' });
+    const out = el('pre', { style: 'white-space:pre-wrap;margin:10px 0 0' });
+    const create = guard(async () => { const r = await api('licenses', 'POST', { plan: plan.value, days: +days.value, maxDevices: +dev.value, count: +count.value, note: note.value }); out.textContent = r.licenses.map((l) => l.code).join('\n'); toast('已生成 ' + r.licenses.length + ' 个'); });
+    const act = (code, what, body) => guard(async () => { await api('licenses/' + code + '/' + what, 'POST', body || {}); toast('已完成'); render(); });
+    const rows = licenses.map((l) => el('tr', {}, el('td', {}, el('code', { text: l.code }), el('div', { class: 'tag ' + l.state, text: { active: '有效', revoked: '已停用', expired: '已过期' }[l.state] || l.state })), el('td', { text: l.plan + (l.note ? ' · ' + l.note : '') }), el('td', { text: l.expires ? fmt(l.expires) : '永久' }), el('td', { text: l.devices.length + ' / ' + l.maxDevices }),
+      el('td', {}, l.revoked ? el('button', { class: 'b', onclick: act(l.code, 'restore'), text: '恢复' }) : el('button', { class: 'b d', onclick: act(l.code, 'revoke'), text: '停用' }), ' ', el('button', { class: 'b', onclick: act(l.code, 'extend', { days: 30 }), text: '+30 天' }), ' ', el('button', { class: 'b', onclick: act(l.code, 'reset-devices'), text: '清设备' }), ' ', el('button', { class: 'b d', onclick: guard(async () => { if (confirm('删除后不可恢复,确定?')) { await api('licenses/' + l.code, 'DELETE'); render(); } }), text: '删除' }))));
+    return el('div', {}, el('div', { class: 'card' }, el('h2', { text: '生成授权码' }), el('div', { class: 'row' }, el('div', {}, el('label', { text: '类型' }), plan), el('div', {}, el('label', { text: '有效天数' }), days), el('div', {}, el('label', { text: '设备数上限' }), dev), el('div', {}, el('label', { text: '数量' }), count)), el('label', { text: '备注' }), note, el('div', { style: 'margin-top:12px' }, el('button', { class: 'b p', onclick: create, text: '生成' })), out),
+      el('div', { class: 'card' }, el('h2', { text: '授权码(' + licenses.length + ')' }), licenses.length ? el('table', {}, el('thead', {}, el('tr', {}, ['授权码', '类型 / 备注', '到期', '设备', '操作'].map((t) => el('th', { text: t })))), el('tbody', {}, rows)) : el('p', { text: '还没有授权码。', style: 'color:var(--mut)' })));
+  }
+
+  async function viewCfg() {
+    const c = await api('config'), an = c.announcement || {};
+    const txt = el('textarea', { rows: '3', placeholder: '留空 = 不显示公告' }); txt.value = an.text || '';
+    const lvl = el('select', {}, el('option', { value: 'info', text: '普通' }), el('option', { value: 'warn', text: '警示' })); lvl.value = an.level || 'info';
+    const minv = el('input', { placeholder: '例如 1.5.2,留空不限' }); minv.value = c.minVersion || '';
+    const mtext = el('input', { placeholder: '维护提示文字' }); mtext.value = c.maintenanceText || '';
+    const sw = (k, t, h, def) => { const i = el('input', { type: 'checkbox' }); i.checked = c[k] === undefined ? def : !!c[k]; i.dataset.k = k; return el('div', { class: 'sw' }, i, el('div', {}, t, el('small', { text: h }))); };
+    const sws = [sw('requireLicense', '同步与 AI 代理要求授权码', '开启后,没有有效授权码的客户端无法使用你托管的同步和 AI 代理。本地使用不受影响。', false), sw('aiProxy', '开放托管的 AI 代理', '关闭后 /proxy 一律拒绝。', true), sw('maintenance', '维护模式', '开启后同步与代理返回 503。', false)];
+    const save = guard(async () => { const body = { announcement: { text: txt.value.trim(), level: lvl.value }, minVersion: minv.value.trim(), maintenanceText: mtext.value }; sws.forEach((s) => { const i = s.querySelector('input'); body[i.dataset.k] = i.checked; }); await api('config', 'PUT', body); toast('已保存'); });
+    return el('div', {}, el('div', { class: 'card' }, el('h2', { text: '公告' }), el('p', { text: '客户端启动时会在顶部显示,用户可以关闭。', style: 'color:var(--mut);margin:0' }), el('label', { text: '内容(最多 300 字)' }), txt, el('label', { text: '级别' }), lvl),
+      el('div', { class: 'card' }, el('h2', { text: '开关' }), sws, el('label', { text: '最低版本(低于此版本的客户端会提示更新)' }), minv, el('label', { text: '维护提示' }), mtext),
+      el('button', { class: 'b p', onclick: save, text: '保存全部' }));
+  }
+
+  async function render() {
+    $app.replaceChildren();
+    if (!token) { $app.append(login()); return; }
+    const tabs = [['stats', '概览'], ['lic', '授权码'], ['cfg', '公告与开关']];
+    $app.append(el('header', {}, el('b', { text: '时序 · 后台' }), el('nav', {}, tabs.map(([k, t]) => el('button', { class: tab === k ? 'on' : '', onclick: () => { tab = k; render(); }, text: t }))), el('button', { class: 'b', onclick: () => { sessionStorage.removeItem(K); token = ''; render(); }, text: '退出' })));
+    const main = el('main', {}, el('p', { text: '加载中…', style: 'color:var(--mut)' })); $app.append(main);
+    try { const v = await ({ stats: viewStats, lic: viewLic, cfg: viewCfg })[tab](); main.replaceChildren(v); } catch (e) { main.replaceChildren(el('p', { text: '出错:' + e.message })); }
+  }
+  render();
+})();
+</script></body></html>

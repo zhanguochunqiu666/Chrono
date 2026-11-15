@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#F1F3EF" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14181D" media="(prefers-color-scheme: dark)">
+<title>时序 Chrono</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="时序">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="description" content="时序 Chrono:把「接下来该做什么」交给系统去算的个人时间调度。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <nav id="nav" aria-label="主导航"></nav>
+  <main id="main">
+    <header id="top"></header>
+    <div id="banners"></div>
+    <div id="view"></div>
+  </main>
+  <div id="capture"></div>
+</div>
+<div id="sheet-root"></div>
+<div id="focus" hidden></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>
+/* 启动自检:任何脚本加载失败或启动报错,都直接显示在页面上,方便定位 */
+(function () {
+  var errs = [];
+  function show() {
+    var d = document.getElementById('__boot');
+    if (!d) { d = document.createElement('div'); d.id = '__boot'; d.setAttribute('style', 'position:fixed;inset:0;z-index:9999;background:#fff;color:#111;padding:20px;overflow:auto;font:14px/1.6 -apple-system,PingFang SC,sans-serif'); document.body.appendChild(d); }
+    d.innerHTML = '<h2 style="margin:0 0 8px">时序没有正常启动</h2><div style="color:#555">下面是原因,请截图发给开发者。可以先点「清除缓存并重试」。</div>' +
+      '<pre style="white-space:pre-wrap;background:#f4f4f6;padding:10px;border-radius:8px;margin:12px 0;font-size:12px">' + errs.map(function (e) { return String(e).replace(/</g, '&lt;'); }).join('\n') + '\n\n浏览器: ' + navigator.userAgent + '\n地址: ' + location.href + '</pre>' +
+      '<button id="__fix" style="font:inherit;padding:10px 18px;border-radius:10px;border:0;background:#111;color:#fff">清除缓存并重试</button>';
+    document.getElementById('__fix').onclick = function () {
+      var jobs = [];
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) jobs.push(navigator.serviceWorker.getRegistrations().then(function (rs) { return Promise.all(rs.map(function (r) { return r.unregister(); })); }));
+      if (window.caches) jobs.push(caches.keys().then(function (ks) { return Promise.all(ks.map(function (k) { return caches.delete(k); })); }));
+      Promise.all(jobs).then(function () { location.replace(location.pathname + '?r=' + Date.now()); }, function () { location.reload(); });
+    };
+  }
+  window.addEventListener('error', function (e) {
+    var t = e.target;
+    if (t && t !== window && (t.src || t.href)) errs.push('文件加载失败: ' + (t.src || t.href));
+    else errs.push('脚本错误: ' + e.message + ' (' + String(e.filename || '').split('/').pop() + ':' + e.lineno + ')');
+    if (document.body) show();
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) { errs.push('未处理的异常: ' + (e.reason && e.reason.message || e.reason)); if (document.body) show(); });
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      var nav = document.getElementById('nav');
+      if (!nav || !nav.innerHTML) { if (!errs.length) errs.push('页面脚本已加载,但界面没有渲染(没有报错信息)。'); show(); }
+    }, 2500);
+  });
+})();
+</script>
+<script src="core.js"></script>
+<script src="holiday.js"></script>
+<script src="parse.js"></script>
+<script src="sched.js"></script>
+<script src="app.js"></script>
+<script src="views.js"></script>
+<script src="today.js"></script>
+<script src="llm.js"></script>
+<script src="sync.js"></script>
+<script src="longterm.js"></script>
+<script src="remote.js"></script>
+<script src="agent.js"></script>
+<script src="boot.js"></script>
+</body>
+</html>

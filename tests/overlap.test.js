@@ -1,0 +1,21 @@
+// node tests/overlap.test.js —— 先排好任务,再新增固定时间习惯/课表/会议:普通任务自动让位,不重叠
+const C = require('../core.js'); require('../holiday.js'); require('../parse.js'); require('../sched.js');
+const assert = require('assert'); let n = 0; const ok = (c, m) => { assert(c, m); n++; console.log('  ✓ ' + m); };
+const d = (y, m, dd, h = 0, mi = 0) => new Date(y, m - 1, dd, h, mi).getTime(), MIN = 60000;
+const now = d(2026, 11, 30, 5, 0), st = C.fresh(); st.settings.dayStart = 6 * 60;
+const add = (t) => C.addItems(st, C.parse(t, st, now).items, now);
+add('周五前写四个一,三个小时'); add('周四前写红蓝本,两个小时'); C.plan(st, now, 'inc');
+const taskBlocks = () => st.blocks.filter((b) => b.itemId && !b.skipped && b.kind !== 'commit');
+ok(taskBlocks().length >= 2, '前提:任务已排好');
+const t0 = taskBlocks()[0]; const hh = new Date(t0.start).getHours() * 60 + new Date(t0.start).getMinutes();
+C.addHabit(st, { title: '早操', domain: 'health', energy: 'low', days: [0, 1, 2, 3, 4], perWeek: 0, time: hh, dur: 30, pref: 'any', kind: 'habit', skipLeft: 1 }, now);
+C.plan(st, now, 'inc');
+const overlaps = () => { const live = st.blocks.filter((b) => !b.skipped); const r = []; for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) if (live[i].start < live[j].end && live[j].start < live[i].end) r.push(live[i].title + ' × ' + live[j].title); return r; };
+ok(overlaps().length === 0, '新增固定时间的早操后,没有任何块重叠' + (overlaps().length ? ':' + overlaps().slice(0, 3).join(';') : ''));
+ok(st.blocks.filter((b) => b.habitId && !b.skipped).length >= 5, '早操照常生成');
+ok(st.items.filter((i) => i.type === 'task').every((i) => C.placedMin(st, i.id) >= C.effMin(i) - 1), '被让位的任务全部重新落位,没有丢失工作量');
+C.plan(st, now, 'full'); C.plan(st, now, 'inc'); ok(overlaps().length === 0, '重新排程后依然不重叠');
+const lb = taskBlocks()[0]; lb.locked = true; lb.pin = true; const h2 = new Date(lb.start).getHours() * 60 + new Date(lb.start).getMinutes();
+C.addHabit(st, { title: '拉伸', domain: 'health', energy: 'low', days: [0, 1, 2, 3, 4, 5, 6], perWeek: 0, time: h2, dur: 20, pref: 'any', kind: 'habit', skipLeft: 1 }, now); C.plan(st, now, 'inc');
+ok(!st.blocks.some((b) => !b.skipped && b.habitId && b.title === '拉伸' && b.start < lb.end && b.end > lb.start) && !lb.skipped, '被保护的块依旧优先:习惯避开它,它不动');
+console.log('\n重叠测试通过:' + n);

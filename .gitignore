@@ -1,0 +1,11 @@
+node_modules/
+tools/sync-data/
+desktop/app/
+desktop/build/
+desktop/dist/
+deploy/
+www/
+*.log
+.DS_Store
+Thumbs.db
+.env
