@@ -80,14 +80,14 @@
     grid += bl.map((b) => A.blkHtml(b, d0, ppm, a, true)).join('');
     const nm = (t - d0) / MIN;
     if (isToday && nm >= a && nm <= z) grid += '<div class="nowline" style="top:' + ((nm - a) * ppm) + 'px"><span>' + hmm(t) + '</span></div>';
-    html += '<h2>时间轴<span class="aux">块的高度与时长成正比 · 点一下看「为什么排在这里」</span></h2><div class="tl"><div class="tl-grid" style="height:' + H + 'px">' + grid + '</div></div>';
+    html += '<h2>时间轴<span class="aux">块的高度与时长成正比 · 点一下看「为什么排在这里」</span></h2><div class="tl"><div class="tl-grid" data-col="' + d0 + '" data-a="' + a + '" data-z="' + z + '" data-ppm="' + ppm + '" style="height:' + H + 'px">' + grid + '</div></div>';
     if (!bl.length) html += '<div class="empty" style="padding-top:18px">时间轴空着。录入后,每一块都会告诉你为什么排在那里。</div>';
 
     const wdn = C.WD[C.dow(d0)];
     const top = '<div class="datehead"><div class="bigday">' + new Date(d0).getDate() + '</div><div class="dm"><div class="dw">' + wdn + (isToday ? ' · 今天' : '') + '</div><div class="ym">' + MONTH(d0) + (st.settings.term && C.weekNo(st, d0) >= 1 ? ' · 第 ' + C.weekNo(st, d0) + ' 周' : '') + (ht ? ' · ' + ht.name + (ht.cls === 'off' ? '(放假)' : '(补班)') : '') + '</div></div></div>' +
       '<div class="row">' + ring(done, bl.length) + '<button class="iconbtn" data-act="search" aria-label="搜索">' + ICON.search + '</button><button class="iconbtn" data-act="settings" aria-label="设置">' + ICON.gear + '</button></div>';
     const sub = isToday ? (pending.length ? '还剩 ' + pending.length + ' 件事' + (heaviest ? ',最重的是「' + esc(heaviest.title) + '」' : '') : (bl.length ? '今天的安排都完成了' : '')) : '';
-    return { top: top + (sub ? '' : ''), banners: A.banners(), html: (sub ? '<div class="subline">' + sub + '</div>' : '') + html };
+    return { top: top + (sub ? '' : ''), banners: A.banners(), after: () => A.initDrag && A.initDrag(), html: (sub ? '<div class="subline">' + sub + '</div>' : '') + html };
   };
 
   document.addEventListener('click', (e) => {

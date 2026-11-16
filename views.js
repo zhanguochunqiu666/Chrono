@@ -4,6 +4,7 @@
   const C = G.Chrono, A = G.A, { MIN, DAY, DOMAINS, DOMAIN_KEYS } = C;
   const { $, esc, now, tint, hmm } = A;
   const S = () => A.st.settings;
+  const pt2 = (v) => { const m = String(v || '').match(/^(\d{1,2}):(\d{2})/); return m ? +m[1] * 60 + +m[2] : null; };
   const fmtMD = (ts) => { const d = new Date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日'; };
 
   A.download = (name, mime, text) => {
@@ -20,7 +21,7 @@
     let h = '<div class="weekbar"><button class="btn sm" data-act="week" data-v="-1">‹ 上一周</button><button class="btn sm" data-act="week" data-v="0">本周</button><button class="btn sm" data-act="week" data-v="1">下一周 ›</button><span class="grow"></span>' +
       '<button class="btn sm" data-act="replan">重新排程</button><button class="btn sm" data-act="ics">导出到日历</button></div>';
     h += '<div class="legend"><span><i style="background:#3E5C9A"></i>专注块(实色)</span><span><i style="background:' + tint('#3E5C9A', .25) + '"></i>事务块(浅色)</span><span><i style="border:1.5px solid #3E5C9A"></i>承诺块(描边)</span><span><i style="border:1px dashed #8A949D"></i>留白</span><span>左侧细带 = 优先级</span></div>';
-    h += '<div class="wk"><div class="wk-in"><div class="wk-h"></div>';
+    h += '<div class="wk" data-a="' + a + '" data-z="' + z + '" data-ppm="' + PPM + '"><div class="wk-in"><div class="wk-h"></div>';
     for (let k = 0; k < 7; k++) {
       const d = C.addDays(ws, k), load = C.dayLoad(st, d), cap = C.dayCap(s, d), pct = Math.min(100, load / cap * 100);
       h += '<div class="wk-h ' + (d === today ? 'today' : '') + '"><b>' + C.WD[k] + '</b> <span class="faint">' + fmtMD(d).replace('月', '/').replace('日', '') + '</span>' + (C.Holiday && C.Holiday.tag(d) ? ' <em class="hb ' + C.Holiday.tag(d).cls + '" title="' + C.Holiday.tag(d).long + '">' + C.Holiday.tag(d).text + '</em>' : '') + '<div class="bar ' + (load > cap ? 'over' : '') + '" title="' + C.fmtH(load) + ' / ' + C.fmtH(cap) + '"><i style="width:' + pct + '%"></i></div></div>';
@@ -54,59 +55,110 @@
     return { top: A.topbar('计划', sub), banners: A.banners(), html: h, after: initDrag };
   };
 
-  /* —— 拖拽:实时显示代价 —— */
+  /* —— 拖拽:实时显示代价(计划页周视图 + 今天页时间轴;长按移动,拖底边改结束时间) —— */
   let D = null, winBound = false;
   function initDrag() {
-    const wk = $('.wk'); if (!wk) return;
+    const root = $('.wk') || $('.tl-grid'); if (!root) return;
+    const isWk = /(^|\s)wk(\s|$)/.test(String(root.className || ''));
     const msgEl = () => { let m = $('.dragmsg'); if (!m) { m = document.createElement('div'); m.className = 'dragmsg'; document.body.appendChild(m); } return m; };
     const cleanMsg = () => { const m = $('.dragmsg'); m && m.remove(); };
-    const target = (e) => {
-      const cols = [...D.wk.querySelectorAll('.wk-col')]; let col = null;
-      for (const c of cols) { const r = c.getBoundingClientRect(); if (e.clientX >= r.left && e.clientX < r.right) { col = c; break; } }
-      if (!col) col = cols.reduce((best, c) => { const r = c.getBoundingClientRect(); const dd = Math.abs(e.clientX - (r.left + r.right) / 2); return !best || dd < best.dd ? { c, dd } : best; }, null).c;
-      const r = col.getBoundingClientRect(), a = S().dayStart;
-      let min = (e.clientY - r.top - D.grab) / PPM + a; min = Math.round(min / 15) * 15;
-      min = Math.max(a, Math.min(S().dayEnd - D.dur, min));
+    const SNAP = 5;
+    const cols = () => (isWk ? [...D.root.querySelectorAll('.wk-col')] : [D.root]);
+    const geo = () => ({ a: +D.root.dataset.a, z: +D.root.dataset.z, ppm: +D.root.dataset.ppm });
+    const target = (cx, cy) => {
+      const cs = cols(); let col = null;
+      for (const c of cs) { const r = c.getBoundingClientRect(); if (cx >= r.left && cx < r.right) { col = c; break; } }
+      if (!col) col = cs.reduce((best, c) => { const r = c.getBoundingClientRect(); const dd = Math.abs(cx - (r.left + r.right) / 2); return !best || dd < best.dd ? { c, dd } : best; }, null).c;
+      const r = col.getBoundingClientRect(), g = geo();
+      let min = (cy - r.top - D.grab) / g.ppm + g.a; min = Math.round(min / SNAP) * SNAP;
+      min = Math.max(g.a, Math.min(g.z - D.dur, min));
       return { col, day: +col.dataset.col, start: +col.dataset.col + min * MIN, r };
     };
-    wk.addEventListener('pointerdown', (e) => {
-      const el = e.target.closest('.blk'); if (!el || e.button > 0) return;
-      const b = A.st.blocks.find((x) => x.id === el.dataset.id); if (!b) return;
-      const rect = el.getBoundingClientRect();
-      D = { wk, id: b.id, el, b, x0: e.clientX, y0: e.clientY, grab: e.clientY - rect.top, dur: C.bmin(b), active: false, touch: e.pointerType !== 'mouse', rect0: rect };
-      if (D.touch) D.timer = setTimeout(() => activate(), 320);
-    });
-    function activate() {
-      if (!D || D.active) return;
-      if (D.b.kind === 'commit') { A.toast('承诺块是别人的时间,不能拖动。'); D = null; return; }
-      D.active = true; D.el.classList.add('drag'); if (navigator.vibrate) navigator.vibrate(8);
-    }
-    const onMove = (e) => {
-      if (!D) return;
-      const dx = e.clientX - D.x0, dy = e.clientY - D.y0;
-      if (!D.active) {
-        if (Math.hypot(dx, dy) > 7) { if (D.touch) { clearTimeout(D.timer); D = null; } else activate(); }
-        return;
-      }
-      e.preventDefault();
-      D.el.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
-      const tg = target(e), cost = C.dragCost(A.st, D.b, tg.start, now());
-      D.tg = tg; D.cost = cost;
-      const m = msgEl(); m.className = 'dragmsg' + (cost.ok ? '' : ' bad');
-      m.textContent = C.WD[C.dow(tg.day)] + ' ' + hmm(tg.start) + ' · ' + (cost.ok ? '没有额外代价' : cost.msgs.join(';'));
+    const begin = (e, el, resize) => {
+      const b = A.st.blocks.find((x) => x.id === el.dataset.id); if (!b) return null;
+      const rect = el.getBoundingClientRect(), touch = e.pointerType ? e.pointerType !== 'mouse' : true;
+      return { root, id: b.id, el, b, x0: e.clientX, y0: e.clientY, grab: e.clientY - rect.top, dur: C.bmin(b), active: false, touch, rect0: rect, resize, scroll0: 0, edge: 0 };
     };
-    const onTouch = (e) => { if (D && D.active) e.preventDefault(); };
-    const up = () => {
-      if (!D) return; clearTimeout(D.timer);
-      const d = D; D = null; cleanMsg();
+    const activate = () => {
+      if (!D || D.active) return;
+      if (D.b.kind === 'commit' || D.b.done) { A.toast(D.b.done ? '已完成的块不能拖动。' : '承诺块是别人的时间,不能拖动。'); endDrag(); return; }
+      D.active = true; D.el.classList.add('drag'); document.documentElement.classList.add('dragging');
+      if (navigator.vibrate) navigator.vibrate(10);
+      D.el.style.transition = 'none'; D.sy = window.scrollY; D.autoRaf = requestAnimationFrame(autoScroll);
+    };
+    const autoScroll = () => {
+      if (!D || !D.active) return;
+      if (D.edge) { window.scrollBy(0, D.edge); if (D.last) update(D.last.x, D.last.y); }
+      D.autoRaf = requestAnimationFrame(autoScroll);
+    };
+    const update = (cx, cy) => {
+      D.last = { x: cx, y: cy };
+      const g = geo(), dxs = cx - D.x0, dys = cy - D.y0 + (window.scrollY - D.sy);
+      const m = msgEl();
+      if (D.resize) {
+        const r = (isWk ? D.el.parentNode : D.root).getBoundingClientRect();
+        const sMin = (D.b.start - C.dayStart(D.b.start)) / MIN;
+        let em = (cy - r.top) / g.ppm + g.a; em = Math.round(em / SNAP) * SNAP; em = Math.max(sMin + 15, Math.min(g.z, em));
+        D.newEnd = C.dayStart(D.b.start) + em * MIN;
+        D.el.style.height = Math.max((em - sMin) * g.ppm - 2, 22) + 'px';
+        const clash = A.st.blocks.find((x) => x.id !== D.b.id && !x.skipped && x.kind !== 'free' && x.start < D.newEnd && x.end > D.b.start);
+        m.className = 'dragmsg' + (clash ? ' bad' : ''); m.textContent = hmm(D.b.start) + ' – ' + hmm(D.newEnd) + ' · ' + C.fmtDur(Math.round((D.newEnd - D.b.start) / MIN)) + (clash ? ' · 与「' + clash.title + '」重叠' : '');
+      } else {
+        D.el.style.transform = 'translate(' + dxs + 'px,' + dys + 'px) scale(1.03)';
+        const tg = target(cx, cy), cost = C.dragCost(A.st, D.b, tg.start, now());
+        D.tg = tg; D.cost = cost;
+        m.className = 'dragmsg' + (cost.ok ? '' : ' bad');
+        m.textContent = C.WD[C.dow(tg.day)] + ' ' + hmm(tg.start) + '–' + hmm(tg.start + D.dur * MIN) + ' · ' + (cost.ok ? '没有额外代价' : cost.msgs.join(';'));
+      }
+      const H = window.innerHeight; D.edge = cy < 110 ? -Math.ceil((110 - cy) / 8) : cy > H - 130 ? Math.ceil((cy - (H - 130)) / 8) : 0;
+    };
+    function endDrag() { if (!D) return; clearTimeout(D.timer); cancelAnimationFrame(D.autoRaf); document.documentElement.classList.remove('dragging'); D = null; cleanMsg(); }
+    const finish = (cancel) => {
+      if (!D) return; const d = D; endDrag();
       if (!d.active) return;
-      A._dragged = true; setTimeout(() => (A._dragged = false), 60);
-      if (d.tg && d.tg.start !== d.b.start) A.mutate(() => C.moveBlock(A.st, d.id, d.tg.start), '已移到 ' + C.WD[C.dow(d.tg.day)] + ' ' + hmm(d.tg.start) + '。这一块之后不会被自动重排' + (d.cost && d.cost.msgs.length ? '(' + d.cost.msgs.join(';') + ')' : ''));
+      A._dragged = true; setTimeout(() => (A._dragged = false), 400);
+      if (cancel) { A.render(); return; }
+      if (d.resize) {
+        if (d.newEnd && d.newEnd !== d.b.end) {
+          const clash = A.st.blocks.find((x) => x.id !== d.b.id && !x.skipped && x.kind !== 'free' && x.start < d.newEnd && x.end > d.b.start);
+          A.mutate(() => { d.b.end = d.newEnd; d.b.locked = true; });
+          A.toast('已改为 ' + hmm(d.b.start) + '–' + hmm(d.newEnd) + (clash ? ',但与「' + clash.title + '」重叠了' : '') + '。');
+        } else A.render();
+      } else if (d.tg && d.tg.start !== d.b.start) A.mutate(() => C.moveBlock(A.st, d.id, d.tg.start), '已移到 ' + C.WD[C.dow(d.tg.day)] + ' ' + hmm(d.tg.start) + '。这一块之后不会被自动重排' + (d.cost && d.cost.msgs.length ? '(' + d.cost.msgs.join(';') + ')' : ''));
       else A.render();
     };
-    if (!winBound) { winBound = true; G.addEventListener('pointermove', onMove, { passive: false }); G.addEventListener('touchmove', onTouch, { passive: false }); G.addEventListener('pointerup', up); G.addEventListener('pointercancel', up); }
+    /* 触摸:用 touch 事件驱动(pointer 事件在触摸滚动时会被浏览器取消);鼠标/笔:pointer 事件 */
+    const hit = (e) => { const t = e.target; if (!t.closest) return null; const rz = t.closest('.rz'), el = t.closest('.blk'); return el && root.contains(el) ? { el, resize: !!rz } : null; };
+    root.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.blk')) e.preventDefault(); });
+    root.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) { endDrag(); return; }
+      const h = hit(e); if (!h) return; const t = e.touches[0];
+      D = begin({ clientX: t.clientX, clientY: t.clientY, pointerType: 'touch' }, h.el, h.resize); if (!D) return;
+      if (h.resize) activate(); else D.timer = setTimeout(activate, 280);
+    }, { passive: true });
+    root.addEventListener('mousedown', (e) => {
+      if (e.button > 0) return; const h = hit(e); if (!h) return;
+      D = begin({ clientX: e.clientX, clientY: e.clientY, pointerType: 'mouse' }, h.el, h.resize); if (D && h.resize) activate();
+    });
+    if (!winBound) {
+      winBound = true;
+      G.addEventListener('touchmove', (e) => {
+        if (!D || !D.touch) return; const t = e.touches[0];
+        if (!D.active) { if (Math.hypot(t.clientX - D.x0, t.clientY - D.y0) > 9) endDrag(); return; }
+        if (e.cancelable) e.preventDefault(); update(t.clientX, t.clientY);
+      }, { passive: false });
+      G.addEventListener('touchend', () => { if (D && D.touch) finish(false); });
+      G.addEventListener('touchcancel', () => { if (D && D.touch) finish(true); });
+      G.addEventListener('mousemove', (e) => {
+        if (!D || D.touch) return;
+        if (!D.active) { if (Math.hypot(e.clientX - D.x0, e.clientY - D.y0) > 7) activate(); return; }
+        e.preventDefault(); update(e.clientX, e.clientY);
+      });
+      G.addEventListener('mouseup', () => { if (D && !D.touch) finish(false); });
+    }
   }
 
+  A.initDrag = initDrag;
   A.promoteInbox = (id, extra) => {
     const it = C.itemOf(A.st, id); if (!it) return;
     A.mutate(() => {
@@ -382,6 +434,20 @@
       const ne = b.start + nd * MIN, clash = st.blocks.find((x) => x.id !== b.id && !x.skipped && x.kind !== 'free' && x.start < ne && x.end > b.start);
       A.mutate(() => { b.end = ne; b.locked = true; }); A.openBlock(b.id);
       if (clash) A.toast('现在与「' + clash.title + '」重叠了。');
+    } else if (a === 'blk-time-set') {
+      const b = st.blocks.find((x) => x.id === el.dataset.id); if (!b) return;
+      const sa = pt2(($('#btA') || {}).value), sb = pt2(($('#btB') || {}).value);
+      if (sa == null || sb == null) { A.toast('请选择开始和结束时间。'); return; }
+      if (sb - sa < 5) { A.toast('结束时间要晚于开始时间(至少 5 分钟)。'); return; }
+      const d0 = C.dayStart(b.start), ns = d0 + sa * MIN, ne = d0 + sb * MIN;
+      const clash = st.blocks.find((x) => x.id !== b.id && !x.skipped && x.kind !== 'free' && x.start < ne && x.end > ns);
+      A.mutate(() => { b.start = ns; b.end = ne; b.locked = true; b.moved = true; b.why = '你手动设定了时间,系统不会再动它'; }); A.openBlock(b.id);
+      A.toast(clash ? '已设为 ' + hmm(ns) + '–' + hmm(ne) + ',但与「' + clash.title + '」重叠了。' : '已设为 ' + hmm(ns) + '–' + hmm(ne) + '。');
+    } else if (a === 'blk-shift') {
+      const b = st.blocks.find((x) => x.id === el.dataset.id); if (!b) return; const v = +el.dataset.v * MIN;
+      const clash = st.blocks.find((x) => x.id !== b.id && !x.skipped && x.kind !== 'free' && x.start < b.end + v && x.end > b.start + v);
+      A.mutate(() => { b.start += v; b.end += v; b.locked = true; b.moved = true; b.why = '你手动设定了时间,系统不会再动它'; }); A.openBlock(b.id);
+      if (clash) A.toast('现在与「' + clash.title + '」重叠了。');
     } else if (a === 'zone-add') {
       const d = +$('#zDow').value, [h1, m1] = $('#zA').value.split(':').map(Number), [h2, m2] = $('#zB').value.split(':').map(Number), s1 = h1 * 60 + m1, e1 = h2 * 60 + m2;
       if (!(e1 - s1 >= 60)) { A.toast('保护区至少 1 小时。'); return; }
@@ -427,7 +493,6 @@
   });
 
   /* ================= 固定周程管理 / 学期 ================= */
-  const pt2 = (v) => { const m = String(v || '').match(/^(\d{1,2}):(\d{2})/); return m ? +m[1] * 60 + +m[2] : null; };
   A.routineSheet = (id, pre) => {
     const h = id ? A.st.habits.find((x) => x.id === id) : null, nw = !h;
     const d = h || Object.assign({ title: '', days: [0], time: 8 * 60, dur: 100, weeks: [], parity: 'all', loc: '', skipHoliday: true, ex: [], domain: 'study' }, pre || {});

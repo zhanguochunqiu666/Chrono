@@ -104,6 +104,19 @@ A.evening(); ok(els['#sheet-root'].innerHTML.includes('收个尾'), '晚间仪�
 A.ritual(0); for (let i = 0; i < 5; i++) { click('rit', { v: '1' }); } ok(true, '周回顾 5 步走通');
 click('ics'); click('csv'); click('json'); ok(true, '导出动作无异常');
 const snap = JSON.stringify(A.st); A.mutate(() => { A.st.items = []; }); A.undo(snap); ok(A.st.items.length > 0, '撤销可恢复');
+// 手机上调整单个块的起止时间
+{
+  click('tab', { v: 'today' }); const b0 = A.st.blocks.find((x) => !x.done && x.kind !== 'commit' && !x.skipped && x.kind !== 'free');
+  if (b0) {
+    const d0 = C.dayStart(b0.start); const mk2 = (v) => ({ value: v });
+    els['#btA'] = mk2('07:10'); els['#btB'] = mk2('08:05');
+    click('blk-time-set', { id: b0.id });
+    ok(b0.start === d0 + 430 * C.MIN && b0.end === d0 + 485 * C.MIN && b0.locked, '块的起止时间可直接设定(7:10–8:05)');
+    const s1 = b0.start; click('blk-shift', { id: b0.id, v: '15' }); ok(b0.start === s1 + 15 * C.MIN, '整体推后 15 分钟');
+    els['#btA'] = mk2('09:00'); els['#btB'] = mk2('08:00'); const e1 = b0.end; click('blk-time-set', { id: b0.id }); ok(b0.end === e1, '结束早于开始会被拒绝');
+  }
+}
+
 click('settings'); click('wipe'); click('wipe'); ok(A.st.items.length === 0, '一键删除');
 
 console.log('\n界面冒烟测试通过:' + n); process.exit(0);

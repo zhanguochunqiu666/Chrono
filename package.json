@@ -1,6 +1,6 @@
 {
   "name": "chrono-shi-xu",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "private": true,
   "description": "时序 Chrono · 本地优先的个人时间调度",
   "scripts": {

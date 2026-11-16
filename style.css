@@ -398,3 +398,20 @@ html { scroll-behavior: smooth; }
 .lt-t .tt { display: block; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lt-t .su { display: block; font-size: 12.5px; color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lt-r:not(.due) .tt { font-weight: 500; color: var(--ink2); }
+
+/* ===== 原生 App 手感(v1.5.3) ===== */
+html { overscroll-behavior-y: none; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; overscroll-behavior-y: none; }
+input, textarea, select, .selectable { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+button, [data-act], .blk, .chip, .opt, .sd, label, select { touch-action: manipulation; }
+a, img { -webkit-user-drag: none; }
+.blk { touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.blk .rz { position: absolute; left: 0; right: 0; bottom: 0; height: 16px; touch-action: none; cursor: ns-resize; }
+.blk .rz::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 26px; height: 3.5px; margin-left: -13px; border-radius: 2px; background: currentColor; opacity: .32; }
+.wk-col .blk .rz { height: 14px; } .wk-col .blk .rz::after { width: 16px; margin-left: -8px; }
+.blk.drag { z-index: 30; opacity: .94; box-shadow: 0 18px 34px -8px rgba(0,0,0,.5); transition: none !important; will-change: transform; }
+html.dragging, html.dragging body { overflow-anchor: none; scroll-behavior: auto; }
+html.dragging * { cursor: grabbing !important; }
+.dragmsg { position: fixed; z-index: 90; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top, 0px) + 10px); max-width: calc(100% - 24px); padding: 9px 16px; border-radius: 999px; font-size: 13.5px; font-weight: 650; background: rgba(20,24,32,.88); color: #fff; box-shadow: 0 10px 30px -10px rgba(0,0,0,.5); pointer-events: none; text-align: center; }
+.dragmsg.bad { background: rgba(176,58,46,.94); }
+input[type=time], input[type=date], input[type=datetime-local] { min-height: 44px; border-radius: 14px; }

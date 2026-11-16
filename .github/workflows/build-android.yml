@@ -1,0 +1,46 @@
+name: Build Android APK
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - name: Install Capacitor
+        run: npm i --no-save @capacitor/core @capacitor/cli @capacitor/android @capacitor/assets
+      - name: Web assets
+        run: node tools/make_www.js
+      - name: Add Android project
+        run: npx cap add android
+      - name: Launcher icons
+        continue-on-error: true
+        run: |
+          mkdir -p assets
+          cp icons/icon-1024.png assets/icon-only.png
+          cp icons/icon-1024.png assets/icon-foreground.png
+          npx capacitor-assets generate --android --iconBackgroundColor '#14181D' --iconBackgroundColorDark '#14181D'
+      - name: Sync
+        run: npx cap sync android
+      - name: Build APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+      - name: Rename
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk Chrono-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chrono-android
+          path: Chrono-android.apk
+      - name: Publish to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Chrono-android.apk
+          generate_release_notes: true

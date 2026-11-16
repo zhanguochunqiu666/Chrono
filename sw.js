@@ -1,5 +1,5 @@
 /* 时序 Chrono · Service Worker:离线外壳 + 通知动作 */
-const VER = 'chrono-v1.4.3';
+const VER = 'chrono-v1.5.3';
 const SHELL = ['./', 'index.html', 'style.css', 'core.js', 'holiday.js', 'parse.js', 'sched.js', 'app.js', 'views.js', 'today.js', 'llm.js', 'sync.js', 'longterm.js', 'remote.js', 'agent.js', 'boot.js', 'manifest.json',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 

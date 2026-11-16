@@ -9,3 +9,9 @@ www/
 .DS_Store
 Thumbs.db
 .env
+.wrangler/
+.dev.vars
+*.zip
+android/
+ios/
+assets/
