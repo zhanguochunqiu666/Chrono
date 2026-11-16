@@ -39,7 +39,7 @@ let n = 0; const ok = (c, m) => { assert(c, m); n++; console.log('  ✓ ' + m); 
   ok((await V('x', 'd')).status === 400, '格式不对 → 400');
   const list = await (await A('licenses')).json(); ok(list.licenses.length === 2 && list.licenses.every((l) => l.devices.every((d) => d.id.length <= 8)), '列表里设备编号被截断,不暴露完整设备 ID');
   ok(list.licenses[0].note.includes('<img') && !JSON.stringify(list).includes('<script'), '备注原样当文本存储(页面用 textContent 渲染,不会执行)');
-  await A('licenses/' + list.licenses[1].code, 'DELETE'); ok((await (await A('licenses')).json()).licenses.length === 1, '删除');
+  await A('licenses/' + list.licenses.find((l) => l.code !== code).code, 'DELETE'); ok((await (await A('licenses')).json()).licenses.length === 1, '删除');
 
   console.log('公告与开关');
   ok((await (await pubcfg({ request: new Request('https://x/api/config'), env })).json()).announcement === null, '默认没有公告');

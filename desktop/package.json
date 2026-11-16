@@ -4,7 +4,10 @@
   "version": "1.5.3",
   "description": "时序 Chrono — 个人时间调度(桌面版)",
   "main": "main.js",
-  "author": "Chrono contributors",
+  "author": {
+    "name": "Chrono contributors",
+    "email": "chrono@users.noreply.github.com"
+  },
   "license": "AGPL-3.0-or-later",
   "private": true,
   "scripts": {
@@ -84,8 +87,9 @@
       ],
       "icon": "build/icon.png",
       "category": "Office",
-      "maintainer": "Chrono contributors",
+      "maintainer": "Chrono contributors <chrono@users.noreply.github.com>",
       "artifactName": "Chrono-${version}.${ext}"
     }
-  }
+  },
+  "homepage": "https://github.com/zhanguochunqiu666/Chrono"
 }
