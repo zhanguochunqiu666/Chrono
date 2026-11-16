@@ -31,7 +31,22 @@ jobs:
         run: npx cap sync android
       - name: Build APK
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon
+        run: |
+          set +e
+          ./gradlew assembleDebug --no-daemon --stacktrace > ../gradle.log 2>&1
+          code=$?
+          if [ $code -ne 0 ]; then
+            msg=$(grep -m1 -A25 "What went wrong" ../gradle.log | sed 's/%/%25/g' | awk '{printf "%s%%0A",$0}')
+            [ -z "$msg" ] && msg=$(tail -40 ../gradle.log | sed 's/%/%25/g' | awk '{printf "%s%%0A",$0}')
+            echo "::error title=GRADLE_FAILED::${msg:0:3800}"
+            tail -60 ../gradle.log
+          fi
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: gradle-log
+          path: gradle.log
       - name: Rename
         run: cp android/app/build/outputs/apk/debug/app-debug.apk Chrono-android.apk
       - uses: actions/upload-artifact@v4
