@@ -21,12 +21,24 @@ jobs:
       - name: Add Android project
         run: npx cap add android
       - name: Launcher icons
-        continue-on-error: true
         run: |
-          mkdir -p assets
-          cp icons/icon-1024.png assets/icon-only.png
-          cp icons/icon-1024.png assets/icon-foreground.png
-          npx capacitor-assets generate --android --iconBackgroundColor '#14181D' --iconBackgroundColorDark '#14181D'
+          pip install pillow
+          python3 - <<'PY'
+          from PIL import Image
+          import os
+          src = Image.open('icons/icon-1024.png').convert('RGBA')
+          res = 'android/app/src/main/res'
+          for d in os.listdir(res):
+              if d.startswith('mipmap-anydpi'):
+                  for f in os.listdir(os.path.join(res, d)):
+                      os.remove(os.path.join(res, d, f))
+          for d, sz in {'mdpi':48,'hdpi':72,'xhdpi':96,'xxhdpi':144,'xxxhdpi':192}.items():
+              dd = os.path.join(res, 'mipmap-' + d)
+              os.makedirs(dd, exist_ok=True)
+              im = src.resize((sz, sz), Image.LANCZOS)
+              for n in ('ic_launcher.png', 'ic_launcher_round.png', 'ic_launcher_foreground.png'):
+                  im.save(os.path.join(dd, n))
+          PY
       - name: Sync
         run: npx cap sync android
       - name: Build APK
