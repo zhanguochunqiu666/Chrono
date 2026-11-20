@@ -31,9 +31,9 @@
   };
 
   const pad = (n) => (n < 10 ? '0' : '') + n;
-  const ymd = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
-  const dow = (ts) => (new Date(ts).getDay() + 6) % 7;
-  const day0 = (ts) => { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); };
+  const ymd = (ts) => { const d = C.date(ts); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  const dow = (ts) => (C.date(ts).getDay() + 6) % 7;
+  const day0 = (ts) => C.dayStart(ts);
 
   let table = {};                 // 'YYYY-MM-DD' -> {name, off, src}
   let cache = {};                 // 年份 -> {ts, days:[[date,name,off]]}
@@ -42,7 +42,7 @@
   function fromBuiltin(y) {
     const out = [];
     (BUILTIN[y] || []).forEach(([name, ranges, works]) => {
-      ranges.forEach(([a, b]) => { for (let t = new Date(y + '-' + a + 'T00:00:00').getTime(), e = new Date(y + '-' + b + 'T00:00:00').getTime(); t <= e; t += DAY) out.push([ymd(t), name, 1]); });
+      ranges.forEach(([a, b]) => { for (let t = Date.parse(y + '-' + a + 'T00:00:00Z'), e = Date.parse(y + '-' + b + 'T00:00:00Z'); t <= e; t += DAY) out.push([new Date(t).toISOString().slice(0, 10), name, 1]); });
       works.forEach((w) => out.push([y + '-' + w, name, 0]));
     });
     return out;
@@ -59,7 +59,7 @@
 
   /* 没有官方数据的年份:只估计三个固定日期的节日,并标注「预估」 */
   function estimate(ts) {
-    const d = new Date(ts), m = d.getMonth() + 1, dd = d.getDate();
+    const d = C.date(ts), m = d.getMonth() + 1, dd = d.getDate();
     if (m === 1 && dd === 1) return { name: '元旦', off: true, est: true };
     if (m === 5 && dd === 1) return { name: '劳动节', off: true, est: true };
     if (m === 10 && dd >= 1 && dd <= 3) return { name: '国庆节', off: true, est: true };
@@ -69,7 +69,7 @@
 
   /* kind: holiday 法定放假 | makeup 调休上班 | weekend 普通周末 | work 普通工作日 */
   function info(ts) {
-    const k = ymd(ts), e = table[k] || (hasYear(new Date(ts).getFullYear()) ? null : estimate(ts));
+    const k = ymd(ts), e = table[k] || (hasYear(C.date(ts).getFullYear()) ? null : estimate(ts));
     if (e) return { kind: e.off ? 'holiday' : 'makeup', name: e.name, est: !!e.est };
     return { kind: dow(ts) >= 5 ? 'weekend' : 'work', name: '' };
   }
@@ -87,9 +87,9 @@
   function upcoming(ts, n) {
     const out = []; let cur = null;
     for (let i = 0; i < n; i++) {
-      const t = day0(ts) + i * DAY, inf = info(t);
+      const t = C.addDays(day0(ts), i), inf = info(t);
       if (inf.kind === 'holiday' || inf.kind === 'makeup') {
-        if (cur && cur.name === inf.name && cur.kind === inf.kind && t - cur.end <= DAY) cur.end = t; else { cur = { name: inf.name, kind: inf.kind, start: t, end: t }; out.push(cur); }
+        if (cur && cur.name === inf.name && cur.kind === inf.kind && C.calendarDiff(t, cur.end) <= 1) cur.end = t; else { cur = { name: inf.name, kind: inf.kind, start: t, end: t }; out.push(cur); }
       }
     }
     return out;
@@ -111,7 +111,7 @@
   }
   async function refresh(force) {
     if (!G.fetch || (typeof navigator !== 'undefined' && navigator.onLine === false)) return false;
-    const y = new Date().getFullYear(); let changed = false;
+    const y = C.date().getFullYear(); let changed = false;
     for (const yr of [y, y + 1]) {
       const c = cache[yr]; if (!force && c && Date.now() - c.ts < 7 * DAY) continue;
       const days = await fetchYear(yr);

@@ -18,7 +18,7 @@
     const we = d != null && isRestDay(d) && S.wknd && S.wknd.on;
     return we ? [S.wknd.start, S.wknd.end] : [S.dayStart, S.dayEnd];
   }
-  const isOff = (S, d) => (S.off || []).some((o) => d >= o.from && d <= o.to);
+  const isOff = (S, d) => (S.off || []).some((o) => { const key = C.dateVal(d); return key >= C.dateVal(o.from, o.timeZone || C.timeZone()) && key <= C.dateVal(o.to, o.timeZone || C.timeZone()); });
   const commuteOn = (S, d) => !!(S.commute && S.commute.on && d != null && !isRestDay(d));
   function winMinutes(S, d) {
     const [a, z] = bounds(S, d);
@@ -27,7 +27,7 @@
   const dayCap = (S, d) => (d != null && isOff(S, d) ? 0 : Math.round(winMinutes(S, d) * (1 - S.freeRatio)));
   function dayLoad(st, d) {
     let m = 0;
-    st.blocks.forEach((b) => { if (b.start >= d && b.start < d + DAY && live(b) && !b.missed && b.kind !== 'free') m += bmin(b); });
+    st.blocks.forEach((b) => { if (b.end > d && b.start < addDays(d, 1) && live(b) && !b.missed && b.kind !== 'free') m += (Math.min(b.end, addDays(d, 1)) - Math.max(b.start, d)) / MIN; });
     return m;
   }
   const placedMin = (st, id) => st.blocks.reduce((a, b) => a + (b.itemId === id && live(b) ? bmin(b) : 0), 0);
@@ -37,19 +37,19 @@
     const S = st.settings;
     if (isOff(S, d)) return [];
     const [ba, bz] = bounds(S, d);
-    let lo = d + ba * MIN; const hi = d + (bz - S.endBuffer) * MIN;
+    let lo = C.atMinute(d, ba); const hi = C.atMinute(d, bz - S.endBuffer);
     if (dayStart(now) === d) lo = Math.max(lo, ceil15(now));
     if (lo >= hi) return [];
     const occ = [];
     st.blocks.forEach((b) => {
-      if (b.end <= d || b.start >= d + DAY || !live(b) || b.kind === 'free') return;
+      if (b.end <= d || b.start >= addDays(d, 1) || !live(b) || b.kind === 'free') return;
       if (ignore && ignore(b)) return;
       occ.push({ s: b.start, e: b.end, blk: true });
     });
-    if (S.lunchOn) occ.push({ s: d + S.lunch[0] * MIN, e: d + S.lunch[1] * MIN, blk: false });
+    if (S.lunchOn) occ.push({ s: C.atMinute(d, S.lunch[0]), e: C.atMinute(d, S.lunch[1]), blk: false });
     if (commuteOn(S, d)) {
-      occ.push({ s: d + ba * MIN, e: d + (ba + S.commute.am) * MIN, blk: false });
-      occ.push({ s: d + S.commute.pmAt * MIN, e: d + (S.commute.pmAt + S.commute.pm) * MIN, blk: false });
+      occ.push({ s: C.atMinute(d, ba), e: C.atMinute(d, ba + S.commute.am), blk: false });
+      occ.push({ s: C.atMinute(d, S.commute.pmAt), e: C.atMinute(d, S.commute.pmAt + S.commute.pm), blk: false });
     }
     occ.sort((a, b) => a.s - b.s);
     const gaps = []; let cur = lo, curBlk = false;
@@ -67,11 +67,11 @@
   /* ---------- 选槽(核心打分) ---------- */
   function place(st, it, dur, ctx) {
     const S = st.settings, now = ctx.now, startDay = dayStart(now);
-    let first = startDay, last = startDay + 13 * DAY;
+    let first = startDay, last = addDays(startDay, 13);
     if (it.notBefore) first = Math.max(first, dayStart(it.notBefore));
     if (it.due && !it.lateOk) last = Math.max(first, Math.min(last, dayStart(it.due)));
     if (it.due && dayStart(it.due) < startDay) last = first;
-    if (it.start == null && it.due && it.lateOk) last = startDay + 13 * DAY;
+    if (it.start == null && it.due && it.lateOk) last = addDays(startDay, 13);
     const buf = S.buffer * MIN;
     const hold = Math.max(it.hold || 0, ctx.minStart || 0);
     if (hold) first = Math.max(first, dayStart(hold));
@@ -82,19 +82,19 @@
     for (let d = first; d <= last; d = addDays(d, 1)) {
       const load = dayLoad(st, d), cap = dayCap(S, d);
       if (load + dur > cap && !ctx.ignoreCap) continue;
-      const di = Math.round((d - startDay) / DAY);
-      const daysLeft = it.due ? Math.round((dayStart(it.due) - d) / DAY) : null;
+      const di = C.calendarDiff(d, startDay);
+      const daysLeft = it.due ? C.calendarDiff(it.due, d) : null;
       const w = dow(d);
       const hk = dayKind(d), restPen = it.domain === 'work' && (hk === 'holiday' || hk === 'weekend') ? 45 : 0;
       if (it.domain === 'work' && hk === 'holiday' && S.holidayAvoid !== false && !it.allowHoliday && !(daysLeft != null && daysLeft <= 0)) continue;
       const zones = (S.zones || []).filter((z) => z.dow === w);
-      const sameItemToday = st.blocks.some((b) => b.itemId === it.id && live(b) && b.start >= d && b.start < d + DAY);
+      const sameItemToday = st.blocks.some((b) => b.itemId === it.id && live(b) && b.start >= d && b.start < addDays(d, 1));
       for (const g of gapsOf(st, d, now, ign)) {
         let s0 = g.s + (g.lb ? buf : 0);
         if (hold && s0 < hold) s0 = ceil15(hold);
         const e0 = g.e - (g.rb ? buf : 0);
         for (let s = ceil15(s0); s + dur * MIN <= e0; s += 15 * MIN) {
-          const sm = (s - d) / MIN, em = sm + dur;
+          const sm = C.minuteOfDay(s), em = C.minuteOfDay(s + dur * MIN);
           if (zones.some((z) => !isDeep && sm < z.end && em > z.start)) continue;
           const peakOverlap = Math.max(0, Math.min(em, S.peak[1]) - Math.max(sm, S.peak[0]));
           const inPeak = peakOverlap >= dur * 0.8;
@@ -141,6 +141,52 @@
   const kindOf = (it) => (it.type === 'event' ? 'commit' : it.energy === 'deep' ? 'focus' : 'admin');
 
   /* ---------- 习惯生成 ---------- */
+  const occurrenceKey = (h, date) => h.id + '@' + date;
+  const recurringId = (h, date) => 'b' + h.id + 'd' + date.replace(/-/g, '');
+  function occurrenceOf(b, h) {
+    if (!h || !b.hkey || b.hkey.includes('#dup')) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(b.occurrenceDate || '')) return b.occurrenceDate;
+    const prefix = h.id + '@'; if (!b.hkey.startsWith(prefix)) return null;
+    const match = b.hkey.slice(prefix.length).match(/^(\d+)(?:p*|m)$/); if (!match) return null;
+    const midnight = +match[1]; if (!Number.isFinite(midnight) || Math.abs(midnight) > 8640000000000000) return null;
+    const zone = b.timeZone && b.timeZone !== 'system' && C.validTimeZone(b.timeZone) ? b.timeZone : C.inferTimeZone(midnight, h.timeZone);
+    return C.dateVal(midnight, zone);
+  }
+  // 同一次周期安排的身份是「模板 ID + 原定日历日期」,不随显示时区或调课而变化。
+  function repairRecurring(st, versions) {
+    let changed = C.initTimeZones(st), duplicates = 0;
+    const habits = new Map(st.habits.map((h) => [h.id, h])), groups = new Map();
+    st.blocks.forEach((b) => {
+      if (b.duplicateOf) { if (!b.skipped) { b.skipped = true; changed++; } return; }
+      const h = habits.get(b.habitId || b.routineId), date = occurrenceOf(b, h); if (!date) return;
+      if (b.occurrenceDate !== date) { b.occurrenceDate = date; changed++; }
+      if (!b.timeZone) { b.timeZone = h.timeZone; changed++; }
+      if (/m$/.test(b.hkey)) { b.hkey = b.hkey.slice(0, -1); b.moved = true; b.pin = true; b.locked = true; changed++; }
+      if (b.skipped) return;
+      const key = occurrenceKey(h, date); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(b);
+    });
+    const acted = (b) => b.done || b.started ? 3 : b.moved || b.pin || /p+$/.test(b.hkey || '') || /你手动/.test(b.why || '') ? 2 : 0;
+    groups.forEach((group) => {
+      if (group.length < 2) return;
+      const h = habits.get(group[0].habitId || group[0].routineId), date = group[0].occurrenceDate;
+      const expected = C.withTimeZone(h.timeZone, () => {
+        const d = C.parseDateTime(date), ex = (h.ex || []).find((e) => C.dateVal(e.date) === date);
+        return ex && ex.type === 'move' && ex.to ? C.atMinute(ex.to.date, ex.to.start) : h.time == null ? null : C.atMinute(d, h.time);
+      });
+      group.sort((a, b) => acted(b) - acted(a) || (Number(b.start === expected) - Number(a.start === expected)) || ((versions && versions[b.id] || {}).u || 0) - ((versions && versions[a.id] || {}).u || 0) || String(a.id).localeCompare(String(b.id)));
+      const keeper = group[0];
+      group.slice(1).forEach((b) => {
+        // 两条都被明确操作过且内容不同:保留给用户判断,不猜哪次操作正确。
+        if (acted(b) && (b.start !== keeper.start || b.end !== keeper.end || !!b.done !== !!keeper.done || !!b.started !== !!keeper.started || (b.actual || 0) !== (keeper.actual || 0))) return;
+        b.skipped = true; b.duplicateOf = keeper.id; duplicates++; changed++;
+      });
+    });
+    return { changed, duplicates };
+  }
+  function occurrenceSet(st) {
+    const habits = new Map(st.habits.map((h) => [h.id, h]));
+    return new Set(st.blocks.filter((b) => !b.duplicateOf).map((b) => { const h = habits.get(b.habitId || b.routineId), date = occurrenceOf(b, h); return date ? occurrenceKey(h, date) : null; }).filter(Boolean));
+  }
   const HWIN = (S, d) => { const [a, z] = bounds(S, d); return { morning: [a, 11 * 60 + 30], noon: [13 * 60, 15 * 60], evening: [18 * 60, z - S.endBuffer], any: [a, z - S.endBuffer] }; };
   function habitDays(h, ws) {
     if (h.days) return h.days;
@@ -148,17 +194,20 @@
     return [...Array(n)].map((_, i) => Math.floor((i + 0.5) * 7 / n));
   }
   function genHabits(st, now, res, H) {
+    repairRecurring(st);
     H = H || 56;                                   // 周期事项默认往后排 8 周;翻到更远会由 ensureHorizon 补齐
-    const S = st.settings, t0 = dayStart(now), have = new Set(st.blocks.filter((b) => b.hkey && !b.skipped).map((b) => b.hkey));
-    st.habits.forEach((h) => {
+    const S = st.settings, have = occurrenceSet(st);
+    st.habits.forEach((h) => C.withTimeZone(h.timeZone || C.timeZone(), () => {
+      const t0 = dayStart(now);
       if (h.paused || h.routine) return;
-      const mkAt = (d, s, kind, why) => { const key = h.id + '@' + d; st.blocks.push({ id: uid(st, 'b'), habitId: h.id, hkey: key, title: h.title, domain: h.domain, kind, start: s, end: s + h.dur * MIN, locked: !!h.time, ctx: '', why, prio: 2 }); have.add(key); };
+      const keyAt = (d) => occurrenceKey(h, C.dateVal(d));
+      const mkAt = (d, s, kind, why) => { const date = C.dateVal(d); st.blocks.push({ id: recurringId(h, date), habitId: h.id, hkey: h.id + '@' + d, occurrenceDate: date, timeZone: h.timeZone || C.timeZone(), title: h.title, domain: h.domain, kind, start: s, end: s + h.dur * MIN, locked: h.time != null, ctx: '', why, prio: 2 }); have.add(keyAt(d)); };
       const findSlot = (d) => {
         const win = HWIN(S, d), [wa, wb] = win[h.pref] || win.any, dur = h.dur, buf = S.buffer * MIN; let best = null;
         if (dayLoad(st, d) + dur > dayCap(S, d)) return null;
         for (const g of gapsOf(st, d, now)) {
-          const lo = Math.max(g.s + (g.lb ? buf : 0), d + wa * MIN), hi = Math.min(g.e - (g.rb ? buf : 0), d + wb * MIN);
-          for (let s = ceil15(lo); s + dur * MIN <= hi; s += 15 * MIN) { const c = (s - d) / MIN / 60 * 0.3; if (!best || c < best.c) best = { s, c }; }
+          const lo = Math.max(g.s + (g.lb ? buf : 0), C.atMinute(d, wa)), hi = Math.min(g.e - (g.rb ? buf : 0), C.atMinute(d, wb));
+          for (let s = ceil15(lo); s + dur * MIN <= hi; s += 15 * MIN) { const c = C.minuteOfDay(s) / 60 * 0.3; if (!best || c < best.c) best = { s, c }; }
         }
         return best && best.s;
       };
@@ -166,17 +215,17 @@
       if (h.perWeek && !h.days && !h.monthDay && !h.every) {
         /* 「每周 N 次」没有指定星期:逐周挑最空的日子自动落位,某天排满就换一天,而不是跳过 */
         const n = Math.max(1, Math.min(7, h.perWeek));
-        for (let w0 = C.weekStart(t0); w0 < t0 + H * DAY; w0 = addDays(w0, 7)) {
-          const days = []; for (let i = 0; i < 7; i++) { const d = addDays(w0, i); if (d >= t0 && d < t0 + H * DAY && !isOff(S, d) && !restBlocked(d)) days.push(d); }
-          let got = days.filter((d) => have.has(h.id + '@' + d)).length;
+        for (let w0 = C.weekStart(t0); w0 < addDays(t0, H); w0 = addDays(w0, 7)) {
+          const days = []; for (let i = 0; i < 7; i++) { const d = addDays(w0, i); if (d >= t0 && d < addDays(t0, H) && !isOff(S, d) && !restBlocked(d)) days.push(d); }
+          let got = days.filter((d) => have.has(keyAt(d))).length;
           const used = new Set(), prefer = (d) => dayLoad(st, d) + (isRestDay(d) ? 240 : 0) + (h.pref === 'any' && dow(d) >= 5 ? 0 : 0);
           while (got < n) {
-            const cand = days.filter((d) => !have.has(h.id + '@' + d) && !used.has(d)).filter((d) => !used.has(d - DAY) && !used.has(d + DAY) && !have.has(h.id + '@' + (d - DAY)) && !have.has(h.id + '@' + (d + DAY)) || n >= 4).sort((a, b) => prefer(a) - prefer(b));
-            const pool = cand.length ? cand : days.filter((d) => !have.has(h.id + '@' + d) && !used.has(d)).sort((a, b) => prefer(a) - prefer(b));
+            const cand = days.filter((d) => !have.has(keyAt(d)) && !used.has(d)).filter((d) => !used.has(addDays(d, -1)) && !used.has(addDays(d, 1)) && !have.has(keyAt(addDays(d, -1))) && !have.has(keyAt(addDays(d, 1))) || n >= 4).sort((a, b) => prefer(a) - prefer(b));
+            const pool = cand.length ? cand : days.filter((d) => !have.has(keyAt(d)) && !used.has(d)).sort((a, b) => prefer(a) - prefer(b));
             let placed = false;
             for (const d of pool) {
               used.add(d);
-              if (h.time != null) { const s0 = d + h.time * MIN; if (s0 + h.dur * MIN > now && !clashHard(st, s0, s0 + h.dur * MIN)) { mkAt(d, s0, 'admin', '你设定的时间'); placed = true; break; } continue; }
+              if (h.time != null) { const s0 = C.atMinute(d, h.time); if (s0 + h.dur * MIN > now && !clashHard(st, s0, s0 + h.dur * MIN)) { mkAt(d, s0, 'admin', '你设定的时间'); placed = true; break; } continue; }
               const s0 = findSlot(d); if (s0) { mkAt(d, s0, 'admin', '每周 ' + n + ' 次:挑了这周比较空的一天,自动排入'); placed = true; break; }
             }
             if (!placed) { res.habitMiss.push({ habit: h, day: w0 }); break; }
@@ -187,23 +236,24 @@
       }
       const wdays = h.monthDay || h.every ? null : habitDays(h);
       for (let k = 0; k < H; k++) {
-        const d = addDays(t0, k), dd = new Date(d);
-        const hit = h.monthDay ? dd.getDate() === Math.min(h.monthDay, new Date(dd.getFullYear(), dd.getMonth() + 1, 0).getDate())
-          : h.every ? Math.round((d - dayStart(h.anchor || h.createdAt || now)) / DAY) % h.every === 0 : wdays.includes(dow(d));
-        if (!hit || isOff(S, d) || have.has(h.id + '@' + d)) continue;
-        if (h.time != null) { const s0 = d + h.time * MIN; if (s0 + h.dur * MIN > now && !clashHard(st, s0, s0 + h.dur * MIN)) mkAt(d, s0, h.kind === 'commit' ? 'commit' : 'admin', '这是你设定的固定节律'); continue; }
+        const d = addDays(t0, k), dd = C.date(d);
+        const hit = h.monthDay ? dd.getDate() === Math.min(h.monthDay, C.makeDate(dd.getFullYear(), dd.getMonth() + 1, 0).getDate())
+          : h.every ? C.calendarDiff(d, h.anchor || h.createdAt || now) % h.every === 0 : wdays.includes(dow(d));
+        if (!hit || isOff(S, d) || have.has(keyAt(d))) continue;
+        if (h.time != null) { const s0 = C.atMinute(d, h.time); if (s0 + h.dur * MIN > now && !clashHard(st, s0, s0 + h.dur * MIN)) mkAt(d, s0, h.kind === 'commit' ? 'commit' : 'admin', '这是你设定的固定节律'); continue; }
         const s0 = findSlot(d); if (s0) mkAt(d, s0, 'admin', '习惯提前占位,优先级高于普通事务'); else res.habitMiss.push({ habit: h, day: d });
       }
-    });
+    }));
   }
 
   /* ---------- 固定周程 / 课表 ---------- */
-  const weekNo = (st, d) => { const T = st.settings.term; return T && T.start ? Math.floor((C.weekStart(d) - T.start) / (7 * DAY)) + 1 : null; };
+  const weekNo = (st, d) => { const T = st.settings.term; return T && T.start ? Math.floor(C.calendarDiff(C.weekStart(d), C.parseDateTime(C.dateVal(T.start, T.timeZone || C.timeZone()))) / 7) + 1 : null; };
   function parseWeeks(v) {                       // "1-8,10-16周" / [[1,8]] → [[1,8],[10,16]]
     if (Array.isArray(v)) return v.filter((r) => Array.isArray(r) && r.length === 2).map((r) => [+r[0], +r[1]]);
     const out = []; String(v || '').replace(/(\d+)\s*[-~到至]\s*(\d+)|(\d+)/g, (m, a, b, c) => { out.push(a ? [+a, +b] : [+c, +c]); return m; }); return out;
   }
   function routineHit(st, h, d) {
+    if (h.timeZone && h.timeZone !== C.timeZone()) { const label = C.dateVal(d); return C.withTimeZone(h.timeZone, () => routineHit(st, h, C.parseDateTime(label))); }
     if (!h.days || !h.days.includes(dow(d))) return false;
     if (h.from && d < h.from) return false; if (h.until && d > h.until) return false;
     const n = weekNo(st, d);
@@ -217,53 +267,45 @@
   function routineLabel(h) {
     const days = h.days && h.days.length === 7 ? '每天' : h.days && h.days.length === 5 && h.days[4] === 4 ? '工作日' : (h.days || []).map((d) => C.WD[d]).join('、');
     const wk = h.weeks && h.weeks.length ? '第' + h.weeks.map((r) => (r[0] === r[1] ? r[0] : r[0] + '–' + r[1])).join('、') + '周' : '';
-    return days + ' ' + fmtM(h.time) + '–' + fmtM(h.time + h.dur) + (wk ? ' · ' + wk : '') + (h.parity === 'odd' ? ' · 单周' : h.parity === 'even' ? ' · 双周' : '') + (h.loc ? ' · ' + h.loc : '');
+    return days + ' ' + fmtM(h.time) + '–' + fmtM(h.time + h.dur) + (h.timeZone && h.timeZone !== C.selectedTimeZone() ? ' · ' + h.timeZone : '') + (wk ? ' · ' + wk : '') + (h.parity === 'odd' ? ' · 单周' : h.parity === 'even' ? ' · 双周' : '') + (h.loc ? ' · ' + h.loc : '');
   }
   const fmtM = (m) => C.p2(Math.floor(m / 60)) + ':' + C.p2(m % 60);
   /* 固定周程一次生成到学期末(至少 20 周),不再只有两周;翻到更远的周时由 ensureHorizon 补齐 */
   function routineHorizon(st, now) {
     const T = st.settings.term, t0 = dayStart(now); let H = 147;
-    if (T && T.start && T.weeks) H = Math.max(H, Math.ceil((T.start + T.weeks * 7 * DAY - t0) / DAY) + 7);
+    if (T && T.start && T.weeks) H = Math.max(H, Math.ceil((addDays(T.start, T.weeks * 7) - t0) / DAY) + 7);
     return Math.min(H, 320);
   }
   function genRoutines(st, now, res, H) {
-    const S = st.settings, t0 = dayStart(now); H = H || routineHorizon(st, now);
-    const have = new Set(st.blocks.map((b) => b.hkey).filter(Boolean));
-    st.habits.forEach((h) => {
+    repairRecurring(st);
+    const S = st.settings; H = H || routineHorizon(st, now);
+    const have = occurrenceSet(st);
+    st.habits.forEach((h) => C.withTimeZone(h.timeZone || C.timeZone(), () => {
+      const t0 = dayStart(now);
       if (!h.routine || h.paused) return;
-      const mk = (key, s, why) => st.blocks.push({ id: uid(st, 'b'), habitId: h.id, routineId: h.id, hkey: key, title: h.title, domain: h.domain, kind: 'commit', start: s, end: s + h.dur * MIN, locked: true, ctx: '', loc: h.loc || '', why, prio: 2 });
+      const mk = (d, s, why) => { const date = C.dateVal(d); st.blocks.push({ id: recurringId(h, date), habitId: h.id, routineId: h.id, hkey: h.id + '@' + d, occurrenceDate: date, timeZone: h.timeZone, title: h.title, domain: h.domain, kind: 'commit', start: s, end: s + h.dur * MIN, locked: true, ctx: '', loc: h.loc || '', why, prio: 2 }); };
       for (let k = 0; k < H; k++) {
-        const d = addDays(t0, k), key = h.id + '@' + d, ex = h.ex && h.ex.length ? h.ex.find((e) => e.date === d) : null;
-        if (ex && ex.type === 'cancel') { if (have.has(key)) { st.blocks = st.blocks.filter((b) => !(b.hkey === key && !b.done)); have.delete(key); } continue; }
+        const d = addDays(t0, k), key = occurrenceKey(h, C.dateVal(d)), ex = h.ex && h.ex.length ? h.ex.find((e) => e.date === d) : null;
+        if (ex && ex.type === 'cancel') { if (have.has(key)) { st.blocks = st.blocks.filter((b) => !(b.habitId === h.id && occurrenceOf(b, h) === C.dateVal(d) && !b.done && !b.started)); have.delete(key); } continue; }
         if (!routineHit(st, h, d)) continue;
         if (ex && ex.type === 'move') continue;                                   // 原时间不上了,新时间在下面生成
         if (isOff(S, d)) continue;
         if (h.skipHoliday !== false && C.Holiday && C.Holiday.info(d).kind === 'holiday') continue;   // 法定节假日自动停课
         if (have.has(key)) continue;
-        const s = d + h.time * MIN; if (s + h.dur * MIN <= now) continue;
-        mk(key, s, '固定周程:' + routineLabel(h)); have.add(key);
+        const s = C.atMinute(d, h.time); if (s + h.dur * MIN <= now) continue;
+        mk(d, s, '固定周程:' + routineLabel(h)); have.add(key);
       }
       (h.ex || []).filter((e) => e.type === 'move' && e.to).forEach((e) => {
-        if (e.to.date < t0 || e.to.date >= t0 + H * DAY) return;
-        const key = h.id + '@' + e.date; if (st.blocks.some((b) => b.hkey === key && !b.skipped)) return;
-        const s = e.to.date + e.to.start * MIN, dur = (e.to.end || e.to.start + h.dur) - e.to.start; if (s + dur * MIN <= now) return;
-        mk(key, s, '调课:原定 ' + C.dayLabel(e.date, now) + ' ' + fmtM(h.time) + (e.reason ? '(' + e.reason + ')' : '')); st.blocks[st.blocks.length - 1].end = s + dur * MIN;
+        if (e.to.date < t0 || e.to.date >= addDays(t0, H)) return;
+        const key = occurrenceKey(h, C.dateVal(e.date)); if (have.has(key)) return;
+        const s = C.atMinute(e.to.date, e.to.start), dur = (e.to.end || e.to.start + h.dur) - e.to.start; if (s + dur * MIN <= now) return;
+        mk(e.date, s, '调课:原定 ' + C.dayLabel(e.date, now) + ' ' + fmtM(h.time) + (e.reason ? '(' + e.reason + ')' : '')); st.blocks[st.blocks.length - 1].end = s + dur * MIN; have.add(key);
       });
-    });
+    }));
   }
-  /* 修复旧版本拖动周期事项留下的坏记录:拖动后 hkey 被改成「…m」,翻周/重排时原位置会被再补一份。
-     做法:找到同周同习惯的重复块(系统补出来的),删掉它,把它的 hkey 还给被拖动的块。返回修复条数。 */
+  /* 兼容旧启动入口:按原定日期修复,不能把同周的其他正常安排当作重复。 */
   function repairMoved(st) {
-    let n = 0;
-    st.blocks.forEach((b) => {
-      if (!b.habitId || !b.hkey || !/m$/.test(b.hkey) || b.skipped) return;
-      const ws = C.weekStart(b.start);
-      const dup = st.blocks.find((x) => x !== b && x.habitId === b.habitId && !x.skipped && !x.done && !x.started && x.hkey && !/m$/.test(x.hkey) && C.weekStart(x.start) === ws && !x.moved);
-      if (dup) { b.hkey = dup.hkey; dup.skipped = true; dup.hkey = dup.hkey + '#dup'; }
-      else { const h = st.habits.find((y) => y.id === b.habitId); const day = String(b.hkey).replace(/m$/, '').split('@')[1]; b.hkey = b.habitId + '@' + (+day || dayStart(b.start)); }
-      b.moved = true; b.pin = true; b.locked = true; n++;
-    });
-    return n;
+    return repairRecurring(st).changed;
   }
 
   /* 查看更远的日期时,把周期事项补生成到那天(幂等);返回是否新增了块 */
@@ -294,13 +336,19 @@
   }
   function routineException(st, id, ex, now) {
     const h = st.habits.find((x) => x.id === id); if (!h) return null;
-    ex.date = dayStart(ex.date); h.ex = (h.ex || []).filter((e) => e.date !== ex.date).concat([ex]);
-    st.blocks = st.blocks.filter((b) => !(b.hkey === id + '@' + ex.date && !b.done));
+    ex.date = C.parseDateTime(C.dateVal(ex.date), h.timeZone || C.timeZone());
+    if (ex.to) ex.to = { ...ex.to, date: C.parseDateTime(C.dateVal(ex.to.date), h.timeZone || C.timeZone()) };
+    h.ex = (h.ex || []).filter((e) => e.date !== ex.date).concat([ex]);
+    const date = C.dateVal(ex.date, h.timeZone);
+    st.blocks = st.blocks.filter((b) => !(b.habitId === id && occurrenceOf(b, h) === date && !b.done && !b.started));
     return plan(st, now, 'inc');
   }
   function removeRoutineException(st, id, date, now) {
     const h = st.habits.find((x) => x.id === id); if (!h) return null;
-    h.ex = (h.ex || []).filter((e) => e.date !== dayStart(date)); st.blocks = st.blocks.filter((b) => !(b.hkey === id + '@' + dayStart(date) && !b.done));
+    const original = C.withTimeZone(h.timeZone || C.timeZone(), () => dayStart(date));
+    h.ex = (h.ex || []).filter((e) => e.date !== original);
+    const key = C.dateVal(original, h.timeZone);
+    st.blocks = st.blocks.filter((b) => !(b.habitId === id && occurrenceOf(b, h) === key && !b.done && !b.started));
     return plan(st, now, 'inc');
   }
 
@@ -320,7 +368,7 @@
     return out;
   }
   function addHabit(st, h, now) {
-    h.id = uid(st, 'h'); h.anchor = dayStart(now); st.habits.push(h); return h;
+    h.id = uid(st, 'h'); h.timeZone = h.timeZone || C.timeZone(); h.anchor = dayStart(now); st.habits.push(h); return h;
   }
   /* 编辑已有事项:改完后只重排它自己 */
   function editItem(st, id, patch, now) {
@@ -346,19 +394,26 @@
   function fromICS(text, now) {
     const lines = String(text).replace(/\r?\n[ \t]/g, '').split(/\r?\n/), out = [];
     let cur = null;
-    const pt = (v) => { const m = v.match(/(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?/); return m ? { ts: new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0)).getTime(), allDay: m[4] == null } : null; };
+    const pt = (v, prop) => {
+      const m = v.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?$/); if (!m) return null;
+      const tz = prop.match(/;TZID=(?:"([^"]+)"|([^;]+))/i), zone = m[7] ? 'UTC' : tz ? tz[1] || tz[2] : C.timeZone();
+      if (!C.validTimeZone(zone)) return null;
+      const value = m[1] + '-' + m[2] + '-' + m[3] + (m[4] == null ? '' : 'T' + m[4] + ':' + m[5] + ':' + (m[6] || '00'));
+      const ts = C.parseDateTime(value, m[4] == null ? C.timeZone() : zone);
+      return ts == null ? null : { ts, allDay: m[4] == null };
+    };
     lines.forEach((ln) => {
       if (ln === 'BEGIN:VEVENT') cur = {}; else if (ln === 'END:VEVENT') { if (cur && cur.s) out.push(cur); cur = null; }
       else if (cur) {
         const i = ln.indexOf(':'); if (i < 0) return; const k = ln.slice(0, i).split(';')[0], v = ln.slice(i + 1);
         if (k === 'SUMMARY') cur.title = v.replace(/\\([,;n\\])/g, (m, c) => (c === 'n' ? ' ' : c));
-        else if (k === 'DTSTART') cur.s = pt(v); else if (k === 'DTEND') cur.e = pt(v); else if (k === 'LOCATION') cur.loc = v.replace(/\\(.)/g, '$1');
+        else if (k === 'DTSTART') cur.s = pt(v, ln.slice(0, i)); else if (k === 'DTEND') cur.e = pt(v, ln.slice(0, i)); else if (k === 'LOCATION') cur.loc = v.replace(/\\(.)/g, '$1');
       }
     });
-    return out.filter((e) => e.title && e.s.ts + DAY > now).map((e) => {
+    return out.filter((e) => e.title && (e.e ? e.e.ts : e.s.allDay ? addDays(e.s.ts, 1) : e.s.ts + 60 * MIN) > now).sort((a, b) => a.s.ts - b.s.ts).map((e) => {
       const dom = C.domainOf(e.title), en = C.energyOf(e.title), title = e.title;
       const base = { id: null, raw: title, title, short: title.length > 12 ? title.slice(0, 12) : title, domain: dom, energy: en, ctx: '', priority: 2, status: 'planned', flex: 'fixed', lead: 0, postponed: 0, actual: 0, createdAt: now, source: 'ics', loc: e.loc || '', conf: 0.95, src: 'stated' };
-      if (e.s.allDay) return Object.assign(base, { type: 'deadline', due: e.s.ts + DAY - 1, estMin: 0, lead: 1440 });
+      if (e.s.allDay) return Object.assign(base, { type: 'deadline', due: e.e && e.e.ts > e.s.ts ? e.e.ts - 1 : C.dayEnd(e.s.ts), estMin: 0, lead: 1440 });
       const end = e.e && e.e.ts > e.s.ts ? e.e.ts : e.s.ts + 60 * MIN;
       return Object.assign(base, { type: 'event', start: e.s.ts, end, estMin: Math.round((end - e.s.ts) / MIN), hasClock: true, lead: 15 });
     });
@@ -367,9 +422,9 @@
   /* 休假 / 出差:这些天不排任务;已排的可移动块让位并重排 */
   function addAway(st, from, to, label, now) {
     from = dayStart(from); to = dayStart(to); if (to < from) { const x = from; from = to; to = x; }
-    (st.settings.off = st.settings.off || []).push({ id: uid(st, 'o'), from, to, label: label || '休假' });
+    (st.settings.off = st.settings.off || []).push({ id: uid(st, 'o'), from, to, timeZone: C.timeZone(), label: label || '休假' });
     let moved = 0;
-    st.blocks.forEach((b) => { if (b.kind !== 'commit' && !b.locked && !b.done && !b.started && !b.skipped && b.start >= from && b.start < to + DAY) { b.skipped = true; moved++; } });
+    st.blocks.forEach((b) => { if (b.kind !== 'commit' && !b.locked && !b.done && !b.started && !b.skipped && b.start >= from && b.start < addDays(to, 1)) { b.skipped = true; moved++; } });
     const res = plan(st, now, 'inc'); res.moved = moved; return res;
   }
   function removeAway(st, id, now) { st.settings.off = (st.settings.off || []).filter((o) => o.id !== id); return plan(st, now, 'inc'); }
@@ -389,7 +444,7 @@
       }
     });
   }
-  const bucket = (ts) => { const h = new Date(ts).getHours(); return h < 12 ? 'am' : h < 18 ? 'pm' : 'eve'; };
+  const bucket = (ts) => { const h = C.date(ts).getHours(); return h < 12 ? 'am' : h < 18 ? 'pm' : 'eve'; };
 
   function snapshot(st, now) {
     const map = {}, per = {};
@@ -402,6 +457,7 @@
 
   function plan(st, now, mode, opts) {
     opts = opts || {};
+    repairRecurring(st);
     const res = { conflicts: [], habitMiss: [], displaced: [], overload: [], diff: { changed: 0, kept: 0 }, placed: 0 };
     if (!st.settings.aiOn) return res;
     sweepMissed(st, now);
@@ -584,7 +640,7 @@
     let load = dayLoad(st, d); if (dayStart(b.start) === d && live(b)) load -= dur;
     const over = Math.max(0, load + dur - cap);
     const clash = st.blocks.find((x) => x.id !== b.id && live(x) && x.start < ne && x.end > ns && x.kind !== 'free');
-    const S = st.settings, sm = (ns - d) / MIN;
+    const S = st.settings, sm = C.minuteOfDay(ns);
     const it = b.itemId ? C.itemOf(st, b.itemId) : null;
     const late = it && it.due && ne > it.due + 1 ? Math.ceil((ne - it.due) / DAY) : 0;
     const msgs = [];
@@ -602,7 +658,7 @@
 
   /* ---------- 复盘与洞察 ---------- */
   function weekStats(st, ws, now) {
-    const we = ws + 7 * DAY; let total = 0, done = 0, deep = 0, task = 0, focusLens = [];
+    const we = addDays(ws, 7); let total = 0, done = 0, deep = 0, task = 0, focusLens = [];
     const per = {}; DOMAIN_KEYS.forEach((k) => (per[k] = { done: 0, plan: 0 }));
     const dayL = {};
     st.blocks.forEach((b) => {
@@ -629,7 +685,7 @@
     let used = 0; Object.keys(w.dayL).forEach((k) => (used += w.dayL[k]));
     let wmTot = 0; for (let k = 0; k < 7; k++) wmTot += winMinutes(S, addDays(ws, k));
     const free = Math.min(1, (1 - used / wmTot) / S.freeRatio);
-    const plans = st.log.filter((l) => l.kind === 'plan' && l.t >= ws - 7 * DAY && l.total > 0);
+    const plans = st.log.filter((l) => l.kind === 'plan' && l.t >= addDays(ws, -7) && l.total > 0);
     const stab = plans.length ? 1 - plans.reduce((a, l) => a + l.changed / l.total, 0) / plans.length : 1;
     return Math.round(100 * (quota * 0.3 + deep * 0.25 + Math.max(0, free) * 0.25 + stab * 0.2));
   }
@@ -655,13 +711,13 @@
     // 领域失衡
     DOMAIN_KEYS.forEach((k) => {
       const Q = S.quotas[k]; if (!Q.lo) return;
-      const cur = w.per[k].done + w.per[k].plan, prev = C.domainWeek(st, ws - 7 * DAY)[k]; const pv = prev.done + prev.plan;
+      const cur = w.per[k].done + w.per[k].plan, prev = C.domainWeek(st, addDays(ws, -7))[k]; const pv = prev.done + prev.plan;
       if (cur < Q.lo * 0.5 && pv > 0 && pv < Q.lo * 0.5) out.push({ id: 'dom-' + k, title: '领域失衡', text: '连续 2 周「' + DOMAINS[k].name + '」投入低于下限的 50%。', effect: '新增一个每周 2 次、每次 45 分钟的「' + DOMAINS[k].name + '」习惯块', action: { type: 'habit', domain: k, title: DOMAINS[k].name + '时间', perWeek: 2, dur: 45 } });
     });
     // 碎片化
     if (w.focusN >= 4 && w.focusAvg < 60) out.push({ id: 'frag', title: '碎片化', text: '你的深度工作平均被切成 ' + Math.round(w.focusAvg) + ' 分钟一段,低于有效阈值。', effect: '把可拆事项的单块上限提高到 120 分钟', action: { type: 'chunk', val: 120 } });
     // 会议侵蚀
-    let meet = 0; st.blocks.forEach((b) => { if (b.kind === 'commit' && b.domain === 'work' && b.start >= ws && b.start < ws + 7 * DAY && !b.skipped) meet += bmin(b); });
+    let meet = 0; st.blocks.forEach((b) => { if (b.kind === 'commit' && b.domain === 'work' && b.start >= ws && b.start < addDays(ws, 7) && !b.skipped) meet += bmin(b); });
     if (meet >= 480) out.push({ id: 'meet', title: '会议侵蚀', text: '本周会议共 ' + C.fmtH(meet) + ',占据了大部分整块时间。', effect: '把周四 9:00–12:00 设为不可预约的深度工作保护区', action: { type: 'zone', dow: 3, start: 540, end: 720 } });
     // 周总结永远有
     out.push({ id: 'week', title: '本周概览', text: w.total ? '本周已到点的 ' + w.total + ' 个块里,按计划完成了 ' + w.done + ' 个(' + Math.round(w.rate * 100) + '%)。' : '本周还没有到点的计划块,先排几件事再来看。',
@@ -680,17 +736,17 @@
 
   /* 在配额不足的领域补一个块 */
   function topUp(st, domain, min, now) {
-    const [it] = addItems(st, [{ title: DOMAINS[domain].name + '时间', short: DOMAINS[domain].name + '时间', type: 'task', domain, energy: 'low', ctx: '', priority: 2, status: 'planned', flex: 'move', lead: 0, estMin: min, statedMin: min, conf: 0.9, src: 'stated', splittable: false, postponed: 0, actual: 0, createdAt: now, notBefore: dayStart(now), due: C.weekStart(now) + 7 * DAY - 1 }], now);
+    const [it] = addItems(st, [{ title: DOMAINS[domain].name + '时间', short: DOMAINS[domain].name + '时间', type: 'task', domain, energy: 'low', ctx: '', priority: 2, status: 'planned', flex: 'move', lead: 0, estMin: min, statedMin: min, conf: 0.9, src: 'stated', splittable: false, postponed: 0, actual: 0, createdAt: now, notBefore: dayStart(now), due: addDays(C.weekStart(now), 7) - 1 }], now);
     return { item: it, res: plan(st, now, 'inc') };
   }
 
   /* ---------- ICS 导出(接入系统日历,带提醒) ---------- */
   const esc = (s) => String(s).replace(/([,;\\])/g, '\\$1').replace(/\n/g, '\\n');
-  const icsT = (ts) => { const d = new Date(ts); return d.getFullYear() + C.p2(d.getMonth() + 1) + C.p2(d.getDate()) + 'T' + C.p2(d.getHours()) + C.p2(d.getMinutes()) + '00'; };
+  const icsT = (ts) => new Date(ts).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
   function toICS(st) {
     const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Chrono//时序//CN', 'CALSCALE:GREGORIAN', 'X-WR-CALNAME:时序 Chrono'];
-    const stamp = icsT(Date.now()) + 'Z'.slice(0, 0);
-    st.blocks.filter((b) => live(b) && !b.missed && b.kind !== 'free').forEach((b) => {
+    const stamp = icsT(Date.now());
+    st.blocks.filter((b) => live(b) && !b.missed && b.kind !== 'free').sort(C.compareBlocks).forEach((b) => {
       const it = b.itemId ? C.itemOf(st, b.itemId) : null;
       L.push('BEGIN:VEVENT', 'UID:' + b.id + '@chrono', 'DTSTAMP:' + stamp, 'DTSTART:' + icsT(b.start), 'DTEND:' + icsT(b.end),
         'SUMMARY:' + esc(b.title), 'DESCRIPTION:' + esc((DOMAINS[b.domain] ? DOMAINS[b.domain].name : '') + ' · ' + (b.why || '')),
@@ -698,12 +754,12 @@
     });
     st.items.filter((i) => i.type === 'deadline' && i.status === 'planned').forEach((i) => {
       const d = dayStart(i.due), n = addDays(d, 1);
-      const ds = (t) => { const x = new Date(t); return x.getFullYear() + C.p2(x.getMonth() + 1) + C.p2(x.getDate()); };
+      const ds = (t) => { const x = C.date(t); return x.getFullYear() + C.p2(x.getMonth() + 1) + C.p2(x.getDate()); };
       L.push('BEGIN:VEVENT', 'UID:' + i.id + '@chrono', 'DTSTAMP:' + stamp, 'DTSTART;VALUE=DATE:' + ds(d), 'DTEND;VALUE=DATE:' + ds(n), 'SUMMARY:' + esc('到期:' + i.short),
         'BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:' + esc(i.short), 'TRIGGER:-PT' + Math.round((i.lead || 1440) / 1) + 'M', 'END:VALARM', 'END:VEVENT');
     });
     (st.settings.off || []).forEach((o) => {
-      const ds = (t) => { const x = new Date(t); return x.getFullYear() + C.p2(x.getMonth() + 1) + C.p2(x.getDate()); };
+      const ds = (t) => { const x = C.date(t); return x.getFullYear() + C.p2(x.getMonth() + 1) + C.p2(x.getDate()); };
       L.push('BEGIN:VEVENT', 'UID:' + o.id + '@chrono', 'DTSTAMP:' + stamp, 'DTSTART;VALUE=DATE:' + ds(o.from), 'DTEND;VALUE=DATE:' + ds(addDays(o.to, 1)), 'SUMMARY:' + esc(o.label), 'END:VEVENT');
     });
     L.push('END:VCALENDAR'); return L.join('\r\n');
@@ -712,13 +768,13 @@
   function toCSV(st) {
     const rows = [['日期', '开始', '结束', '标题', '领域', '类型', '计划分钟', '实际分钟', '状态']];
     st.blocks.slice().sort((a, b) => a.start - b.start).forEach((b) => {
-      const d = new Date(b.start);
+      const d = C.date(b.start);
       rows.push([d.getFullYear() + '-' + C.p2(d.getMonth() + 1) + '-' + C.p2(d.getDate()), fmtT(b.start), fmtT(b.end), b.title, DOMAINS[b.domain] ? DOMAINS[b.domain].name : '', b.kind, bmin(b), b.actual || '', b.done ? '完成' : b.skipped ? '取消' : b.missed ? '漏做' : '计划']);
     });
     return '﻿' + rows.map((r) => r.map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\n');
   }
 
   const viewRange = (S) => { const w = S.wknd && S.wknd.on; return [Math.min(S.dayStart, w ? S.wknd.start : 1e9), Math.max(S.dayEnd, w ? S.wknd.end : 0)]; };
-  Object.assign(C, { isPinned, clashHard, repairMoved, routineHorizon, genRoutines, genHabits, ensureHorizon, findRoutine, weekNo, parseWeeks, routineHit, routineLabel, addRoutine, refreshRoutine, routineException, removeRoutineException, isRestDay, dayKind, commuteOn, isOff, addAway, removeAway, bounds, viewRange, editItem, fromICS, effMin, dayCap, dayLoad, placedMin, gapsOf, place, plan, addItems, addHabit, removeItem, conflictOptions, applyOption, startBlock, markDone, postpone, skipToday, resolveMissed, dragCost, moveBlock, weekStats, balanceIndex, insights, applyInsight, topUp, toICS, toCSV, sweepMissed, winMinutes, bmin });
+  Object.assign(C, { isPinned, clashHard, repairMoved, repairRecurring, occurrenceOf, routineHorizon, genRoutines, genHabits, ensureHorizon, findRoutine, weekNo, parseWeeks, routineHit, routineLabel, addRoutine, refreshRoutine, routineException, removeRoutineException, isRestDay, dayKind, commuteOn, isOff, addAway, removeAway, bounds, viewRange, editItem, fromICS, effMin, dayCap, dayLoad, placedMin, gapsOf, place, plan, addItems, addHabit, removeItem, conflictOptions, applyOption, startBlock, markDone, postpone, skipToday, resolveMissed, dragCost, moveBlock, weekStats, balanceIndex, insights, applyInsight, topUp, toICS, toCSV, sweepMissed, winMinutes, bmin });
   if (typeof module !== 'undefined') module.exports = C;
 })(typeof window !== 'undefined' ? window : globalThis);

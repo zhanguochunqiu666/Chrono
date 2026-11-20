@@ -10,7 +10,7 @@ const C = window.Chrono, S = window.A.Sync, now = new Date(2026, 10, 16, 8, 12).
 const mkDev = () => { const st = C.fresh(); return { st, ver: {} }; };
 const sync2 = (a, b, t) => {   // 模拟 a 与 b 经由云端各同步一次:a 先,b 后,再 a
   let cloud = null;
-  const round = (d, tt) => { const loc = S._collect(d.st, d.ver, tt), m = S._merge(loc, cloud); S._apply(d.st, m, d.ver); if (m.needPush || !cloud) cloud = { ents: m.ents, single: m.single }; };
+  const round = (d, tt) => { const loc = S._collect(d.st, d.ver, tt), m = S._merge(loc, cloud); S._apply(d.st, m, d.ver); cloud = JSON.parse(JSON.stringify(S._collect(d.st, d.ver, tt))); };
   round(a, t); round(b, t + 1000); round(a, t + 2000); round(b, t + 3000); return cloud;
 };
 

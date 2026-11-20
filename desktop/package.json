@@ -1,7 +1,7 @@
 {
   "name": "chrono-desktop",
   "productName": "时序 Chrono",
-  "version": "1.5.3",
+  "version": "1.5.5",
   "description": "时序 Chrono — 个人时间调度(桌面版)",
   "main": "main.js",
   "author": {

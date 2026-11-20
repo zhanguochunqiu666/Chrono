@@ -12,16 +12,16 @@
 
   /* ---------- 数据与规则(纯函数,便于测试) ---------- */
   const list = (st) => (st.longterm = st.longterm || []);
-  function nextDue(h) { return h.lastDone ? day0(h.lastDone) + (h.every || 1) * DAY : day0(h.createdAt || 0); }
+  function nextDue(h) { return h.lastDone ? C.addDays(day0(h.lastDone), h.every || 1) : day0(h.createdAt || 0); }
   function isDue(h, t) { return !h.paused && day0(t) >= nextDue(h) && !(h.snoozeUntil && h.snoozeUntil > t); }
   const dueList = (st, t) => list(st).filter((h) => isDue(h, t));
-  const doneInDays = (h, t, n) => (h.log || []).filter((x) => x > day0(t) - (n - 1) * DAY).length;
+  const doneInDays = (h, t, n) => (h.log || []).filter((x) => x > C.addDays(day0(t), -(n - 1))).length;
   function add(st, d, t) {
     const h = { id: C.uid(st, 'l'), title: String(d.title).trim().slice(0, 40), note: String(d.note || '').slice(0, 120), domain: DOMAINS[d.domain] ? d.domain : C.domainOf(d.title), every: Math.max(1, Math.min(365, Math.round(+d.every || 1))), createdAt: t, lastDone: 0, snoozeUntil: 0, log: [], paused: false };
     list(st).push(h); return h;
   }
   function done(st, id, t) { const h = list(st).find((x) => x.id === id); if (!h) return null; h.lastDone = t; h.snoozeUntil = 0; h.log = (h.log || []).concat([t]).slice(-120); return h; }
-  function snooze(st, id, t) { const h = list(st).find((x) => x.id === id); if (!h) return null; h.snoozeUntil = day0(t) + DAY; return h; }
+  function snooze(st, id, t) { const h = list(st).find((x) => x.id === id); if (!h) return null; h.snoozeUntil = C.addDays(day0(t), 1); return h; }
   const remove = (st, id) => { st.longterm = list(st).filter((x) => x.id !== id); };
 
   /* 自然语言:「长期坚持背英语,每天提醒我」「一直要联系老朋友,每两周」 */
@@ -95,7 +95,7 @@
   /* ---------- 持续提醒:每天固定时间合并成一条;晚间可选再提醒一次 ---------- */
   function ltRemind() {
     if (!A.st || !A.notify) return; const s = S(), cfg = s.ltRemind || { on: true, time: 540, evening: false }; if (!cfg.on || (A.focus)) return;
-    const t = now(), d = day0(t), mins = (t - d) / 60000, due = dueList(A.st, t); if (!due.length) return;
+    const t = now(), d = day0(t), mins = C.minuteOfDay(t), due = dueList(A.st, t); if (!due.length) return;
     const body = due.slice(0, 3).map((h) => h.title).join('、') + (due.length > 3 ? ' 等 ' + due.length + ' 件' : '');
     if (mins >= cfg.time) A.notify('lt:' + d, '长期事项:' + due.length + ' 件在等你', body + '。不急,想做时做。', null, false);
     if (cfg.evening && mins >= 20 * 60) A.notify('lt2:' + d, '今天还有长期事项没动', body, null, false);

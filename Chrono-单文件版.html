@@ -432,6 +432,12 @@ html.dragging * { cursor: grabbing !important; }
 .dragmsg { position: fixed; z-index: 90; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top, 0px) + 10px); max-width: calc(100% - 24px); padding: 9px 16px; border-radius: 999px; font-size: 13.5px; font-weight: 650; background: rgba(20,24,32,.88); color: #fff; box-shadow: 0 10px 30px -10px rgba(0,0,0,.5); pointer-events: none; text-align: center; }
 .dragmsg.bad { background: rgba(176,58,46,.94); }
 input[type=time], input[type=date], input[type=datetime-local] { min-height: 44px; border-radius: 14px; }
+.timezone-button { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 600px) {
+  #top { flex-wrap: wrap; }
+  #top > .row { margin-left: auto; flex-shrink: 0; }
+  .timezone-button { max-width: 120px; }
+}
 
 </style>
 </head>
@@ -497,6 +503,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   const DOMAIN_KEYS = Object.keys(DOMAINS);
 
   const DEFAULT_SETTINGS = () => ({
+    timeZone: 'system',                       // 显示与新事项使用的时区
     dayStart: 8 * 60, dayEnd: 22 * 60,        // 可用时段(分钟)
     wknd: { on: false, start: 9 * 60, end: 22 * 60 },          // 周末使用不同的可用时段
     commute: { on: false, am: 30, pm: 30, pmAt: 18 * 60 },     // 工作日通勤(硬约束)
@@ -533,13 +540,79 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   });
 
   /* ---------- 时间工具 ---------- */
-  const dayStart = (ts) => { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); };
-  const addDays = (ts, n) => { const d = new Date(ts); d.setDate(d.getDate() + n); return d.getTime(); };
-  const weekStart = (ts) => { const d = new Date(dayStart(ts)); const w = (d.getDay() + 6) % 7; return addDays(d.getTime(), -w); };
-  const dow = (ts) => (new Date(ts).getDay() + 6) % 7;   // 周一=0
+  let zoneOverride = null;
+  const formatters = new Map(), partCache = new Map(), validZones = new Map();
+  let deviceZone = null, zoneCheckedAt = 0;
+  const systemTimeZone = () => { if (!deviceZone || Date.now() - zoneCheckedAt > 60000) { deviceZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; zoneCheckedAt = Date.now(); } return deviceZone; };
+  function validTimeZone(zone) { if (!validZones.has(zone)) { try { new Intl.DateTimeFormat('en', { timeZone: zone }); validZones.set(zone, true); } catch (_) { validZones.set(zone, false); } } return validZones.get(zone); }
+  const resolveTimeZone = (zone) => !zone || zone === 'system' || !validTimeZone(zone) ? systemTimeZone() : zone;
+  const selectedTimeZone = () => resolveTimeZone(G.A && G.A.st && G.A.st.settings.timeZone);
+  const timeZone = () => zoneOverride || selectedTimeZone();
+  function withTimeZone(zone, fn) { const previous = zoneOverride; zoneOverride = resolveTimeZone(zone); try { return fn(); } finally { zoneOverride = previous; } }
+  function parts(ts, zone = timeZone()) {
+    const key = zone + ':' + Math.floor(ts / 1000); if (partCache.has(key)) return partCache.get(key);
+    if (!formatters.has(zone)) formatters.set(zone, new Intl.DateTimeFormat('en-GB', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }));
+    const p = {}; formatters.get(zone).formatToParts(new Date(ts)).forEach((v) => { if (v.type !== 'literal') p[v.type] = +v.value; });
+    if (partCache.size > 12000) partCache.clear(); partCache.set(key, p); return p;
+  }
+  const wallStamp = (p) => Date.UTC(p.year, p.month - 1, p.day, p.hour || 0, p.minute || 0, p.second || 0);
+  function fromParts(y, mo, d, h = 0, mi = 0, sec = 0, ms = 0, zone = timeZone()) {
+    const wall = Date.UTC(y, mo, d, h, mi, sec, ms);
+    // 两侧的偏移覆盖夏令时切换。重复时刻取第一次;不存在的时刻向后顺延。
+    const offsets = [...new Set([-36, 0, 36].map((n) => { const t = wall + n * 3600000; return wallStamp(parts(t, zone)) - Math.floor(t / 1000) * 1000; }))];
+    const choices = offsets.map((offset) => wall - offset).sort((a, b) => a - b);
+    const exact = choices.find((t) => wallStamp(parts(t, zone)) === Math.floor(wall / 1000) * 1000);
+    if (exact != null) return exact;
+    return choices.find((t) => wallStamp(parts(t, zone)) >= Math.floor(wall / 1000) * 1000) ?? choices[choices.length - 1];
+  }
+  // 仅用于读取日历字段,时间戳始终保留真实时刻,不修改原生 Date。
+  function date(ts = Date.now(), zone = timeZone()) {
+    const p = parts(ts, zone);
+    return { getFullYear: () => p.year, getMonth: () => p.month - 1, getDate: () => p.day, getHours: () => p.hour, getMinutes: () => p.minute,
+      getDay: () => new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay(), getTime: () => ts };
+  }
+  const makeDate = (...args) => date(fromParts(...args));
+  const dayStart = (ts) => { const p = parts(ts); return fromParts(p.year, p.month - 1, p.day); };
+  const addDays = (ts, n) => { const p = parts(ts); return fromParts(p.year, p.month - 1, p.day + n, p.hour, p.minute, p.second, ((ts % 1000) + 1000) % 1000); };
+  const calendarDiff = (a, b) => Math.round((wallStamp({ ...parts(a), hour: 0, minute: 0, second: 0 }) - wallStamp({ ...parts(b), hour: 0, minute: 0, second: 0 })) / DAY);
+  const dow = (ts) => (date(ts).getDay() + 6) % 7;   // 周一=0
+  const weekStart = (ts) => addDays(dayStart(ts), -dow(ts));
+  const atMinute = (ts, m) => { const p = parts(ts); return fromParts(p.year, p.month - 1, p.day, 0, m); };
+  const minuteOfDay = (ts) => { const p = parts(ts); return p.hour * 60 + p.minute + p.second / 60; };
+  const dayEnd = (ts) => addDays(dayStart(ts), 1) - 1;
+  const dateVal = (ts, zone = timeZone()) => { const p = parts(ts, zone); return p.year + '-' + p2(p.month) + '-' + p2(p.day); };
+  function parseDateTime(value, zone = timeZone()) {
+    const m = String(value || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+    if (!m || +m[2] < 1 || +m[2] > 12 || +m[3] < 1 || +m[3] > new Date(Date.UTC(+m[1], +m[2], 0)).getUTCDate() || +(m[4] || 0) > 23 || +(m[5] || 0) > 59 || +(m[6] || 0) > 59) return null;
+    return fromParts(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0), 0, resolveTimeZone(zone));
+  }
+  const compareBlocks = (a, b) => a.start - b.start || a.end - b.end || String(a.id || '').localeCompare(String(b.id || ''));
+  // 旧记录的 anchor / hkey 是创建地午夜。优先保留已知时区,避免用接收设备的显示时区重解释它。
+  function inferTimeZone(midnight, preferred) {
+    const fallback = resolveTimeZone(preferred);
+    if (!Number.isFinite(midnight)) return fallback;
+    const isMidnight = (zone) => { const p = parts(midnight, zone); return p.hour === 0 && p.minute === 0 && p.second === 0; };
+    if (isMidnight(fallback)) return fallback;
+    const common = ['UTC', 'Asia/Shanghai', 'Asia/Tokyo', 'America/New_York', 'America/Los_Angeles', 'Europe/London', 'Europe/Paris', 'Asia/Kolkata', 'Asia/Kathmandu', 'Asia/Yangon', 'Asia/Kabul', 'Asia/Tehran', 'Australia/Darwin', 'Australia/Adelaide', 'Australia/Lord_Howe', 'Pacific/Chatham', 'America/St_Johns', 'Pacific/Marquesas'];
+    for (let offset = -12; offset <= 14; offset++) common.push(offset === 0 ? 'UTC' : 'Etc/GMT' + (offset > 0 ? '-' : '+') + Math.abs(offset));
+    return common.find((z) => validTimeZone(z) && isMidnight(z)) || fallback;
+  }
+  function initTimeZones(st) {
+    const zone = resolveTimeZone(st.settings.timeZone), old = st.meta.timeZone || zone;
+    let changed = 0;
+    (st.habits || []).forEach((h) => { if (!h.timeZone || h.timeZone === 'system' || !validTimeZone(h.timeZone)) { h.timeZone = inferTimeZone(h.anchor, old); changed++; } });
+    if (st.settings.term && !st.settings.term.timeZone) { st.settings.term.timeZone = inferTimeZone(st.settings.term.start, old); changed++; }
+    (st.settings.off || []).forEach((o) => { if (!o.timeZone) { o.timeZone = inferTimeZone(o.from, old); changed++; } });
+    st.meta.timeZone = zone;
+    return changed;
+  }
+  function changeTimeZone(st, zone) {
+    if (zone !== 'system' && !validTimeZone(zone)) return false;
+    initTimeZones(st); st.settings.timeZone = zone; st.meta.timeZone = resolveTimeZone(zone); return true;
+  }
   const WD = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
   const p2 = (n) => (n < 10 ? '0' : '') + n;
-  const fmtT = (ts) => { const d = new Date(ts); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
+  const fmtT = (ts) => { const d = date(ts); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
   const fmtM = (m) => p2(Math.floor(m / 60)) + ':' + p2(m % 60);
   const fmtDur = (m) => {
     m = Math.round(m);
@@ -550,9 +623,9 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   const fmtH = (m) => (Math.round(m / 6) / 10).toString().replace(/\.0$/, '') + ' 小时';
   const sameDay = (a, b) => dayStart(a) === dayStart(b);
   const dayLabel = (ts, now) => {
-    const diff = Math.round((dayStart(ts) - dayStart(now)) / DAY);
+    const diff = calendarDiff(ts, now);
     if (diff === 0) return '今天'; if (diff === 1) return '明天'; if (diff === 2) return '后天'; if (diff === -1) return '昨天';
-    const d = new Date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + WD[dow(ts)];
+    const d = date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + WD[dow(ts)];
   };
   const ceil15 = (ts) => Math.ceil(ts / (15 * MIN)) * (15 * MIN);
   const uid = (st, p) => (p || 'x') + (st.meta.seq++).toString(36) + Math.random().toString(36).slice(2, 5);
@@ -577,6 +650,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     return mem || fresh();
   }
   function save(st) {
+    st.blocks.sort(compareBlocks);
     mem = st;
     try { G.localStorage && G.localStorage.setItem(KEY, JSON.stringify(st)); saveFailed = false; }
     catch (e) { if (!saveFailed) { saveFailed = true; if (G.A && G.A.toast) G.A.toast('保存失败:浏览器存储空间不足或被禁用。请在设置里导出 JSON 备份,并清理旧数据。', { ms: 9000 }); } }
@@ -585,14 +659,14 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 
   /* ---------- 查询 ---------- */
   const itemOf = (st, id) => st.items.find((i) => i.id === id);
-  const blocksOn = (st, d) => st.blocks.filter((b) => b.start >= d && b.start < d + DAY).sort((a, b) => a.start - b.start);
+  const blocksOn = (st, d) => st.blocks.filter((b) => b.end > d && b.start < addDays(d, 1)).sort(compareBlocks);
   const blockMin = (b) => (b.end - b.start) / MIN;
 
   /* 周内各领域的投入(完成+已排,不含已漏做/跳过) */
   function domainWeek(st, ws) {
     const out = {}; DOMAIN_KEYS.forEach((k) => (out[k] = { done: 0, plan: 0 }));
     st.blocks.forEach((b) => {
-      if (b.start < ws || b.start >= ws + 7 * DAY || b.missed || b.skipped || b.kind === 'free') return;
+      if (b.start < ws || b.start >= addDays(ws, 7) || b.missed || b.skipped || b.kind === 'free') return;
       const o = out[b.domain]; if (!o) return;
       const m = blockMin(b);
       if (b.done) o.done += (b.actual || m); else o.plan += m;
@@ -602,6 +676,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 
   G.Chrono = Object.assign(G.Chrono || {}, {
     MIN, DAY, DOMAINS, DOMAIN_KEYS, WD, fresh, load, save, wipe, DEFAULT_SETTINGS,
+    systemTimeZone, validTimeZone, resolveTimeZone, selectedTimeZone, timeZone, withTimeZone, parts, fromParts, date, makeDate, dateVal, parseDateTime, atMinute, minuteOfDay, dayEnd, calendarDiff, compareBlocks, initTimeZones, changeTimeZone, inferTimeZone,
     dayStart, addDays, weekStart, dow, fmtT, fmtM, fmtDur, fmtH, sameDay, dayLabel, ceil15, uid, p2,
     itemOf, blocksOn, blockMin, domainWeek,
   });
@@ -643,9 +718,9 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   };
 
   const pad = (n) => (n < 10 ? '0' : '') + n;
-  const ymd = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
-  const dow = (ts) => (new Date(ts).getDay() + 6) % 7;
-  const day0 = (ts) => { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); };
+  const ymd = (ts) => { const d = C.date(ts); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); };
+  const dow = (ts) => (C.date(ts).getDay() + 6) % 7;
+  const day0 = (ts) => C.dayStart(ts);
 
   let table = {};                 // 'YYYY-MM-DD' -> {name, off, src}
   let cache = {};                 // 年份 -> {ts, days:[[date,name,off]]}
@@ -654,7 +729,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   function fromBuiltin(y) {
     const out = [];
     (BUILTIN[y] || []).forEach(([name, ranges, works]) => {
-      ranges.forEach(([a, b]) => { for (let t = new Date(y + '-' + a + 'T00:00:00').getTime(), e = new Date(y + '-' + b + 'T00:00:00').getTime(); t <= e; t += DAY) out.push([ymd(t), name, 1]); });
+      ranges.forEach(([a, b]) => { for (let t = Date.parse(y + '-' + a + 'T00:00:00Z'), e = Date.parse(y + '-' + b + 'T00:00:00Z'); t <= e; t += DAY) out.push([new Date(t).toISOString().slice(0, 10), name, 1]); });
       works.forEach((w) => out.push([y + '-' + w, name, 0]));
     });
     return out;
@@ -671,7 +746,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 
   /* 没有官方数据的年份:只估计三个固定日期的节日,并标注「预估」 */
   function estimate(ts) {
-    const d = new Date(ts), m = d.getMonth() + 1, dd = d.getDate();
+    const d = C.date(ts), m = d.getMonth() + 1, dd = d.getDate();
     if (m === 1 && dd === 1) return { name: '元旦', off: true, est: true };
     if (m === 5 && dd === 1) return { name: '劳动节', off: true, est: true };
     if (m === 10 && dd >= 1 && dd <= 3) return { name: '国庆节', off: true, est: true };
@@ -681,7 +756,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 
   /* kind: holiday 法定放假 | makeup 调休上班 | weekend 普通周末 | work 普通工作日 */
   function info(ts) {
-    const k = ymd(ts), e = table[k] || (hasYear(new Date(ts).getFullYear()) ? null : estimate(ts));
+    const k = ymd(ts), e = table[k] || (hasYear(C.date(ts).getFullYear()) ? null : estimate(ts));
     if (e) return { kind: e.off ? 'holiday' : 'makeup', name: e.name, est: !!e.est };
     return { kind: dow(ts) >= 5 ? 'weekend' : 'work', name: '' };
   }
@@ -699,9 +774,9 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   function upcoming(ts, n) {
     const out = []; let cur = null;
     for (let i = 0; i < n; i++) {
-      const t = day0(ts) + i * DAY, inf = info(t);
+      const t = C.addDays(day0(ts), i), inf = info(t);
       if (inf.kind === 'holiday' || inf.kind === 'makeup') {
-        if (cur && cur.name === inf.name && cur.kind === inf.kind && t - cur.end <= DAY) cur.end = t; else { cur = { name: inf.name, kind: inf.kind, start: t, end: t }; out.push(cur); }
+        if (cur && cur.name === inf.name && cur.kind === inf.kind && C.calendarDiff(t, cur.end) <= 1) cur.end = t; else { cur = { name: inf.name, kind: inf.kind, start: t, end: t }; out.push(cur); }
       }
     }
     return out;
@@ -723,7 +798,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   }
   async function refresh(force) {
     if (!G.fetch || (typeof navigator !== 'undefined' && navigator.onLine === false)) return false;
-    const y = new Date().getFullYear(); let changed = false;
+    const y = C.date().getFullYear(); let changed = false;
     for (const yr of [y, y + 1]) {
       const c = cache[yr]; if (!force && c && Date.now() - c.ts < 7 * DAY) continue;
       const days = await fetchYear(yr);
@@ -773,7 +848,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     if ((m = s.match(/明[天日早晚]/))) return day(addDays(t0, 1), m[0]);
     if ((m = s.match(/今[天日早晚]/))) return day(t0, m[0]);
     if ((m = s.match(/周末/))) {
-      const w = dow(t0), sat = w >= 5 ? t0 - (w - 5) * DAY : addDays(weekStart(t0), 5);
+      const w = dow(t0), sat = w >= 5 ? addDays(t0, -(w - 5)) : addDays(weekStart(t0), 5);
       return day(Math.max(sat, t0), m[0], { range: [Math.max(sat, t0), addDays(weekStart(t0), 6)] });
     }
     if ((m = s.match(/(下|这|本)?(?:个)?(?:周|星期|礼拜)([一二三四五六日天])/))) {
@@ -783,16 +858,16 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       return day(ts, m[0]);
     }
     if ((m = s.match(new RegExp('(' + NUM + ')月(' + NUM + ')[日号]?')))) {
-      const mo = cn(m[1]) - 1, d = cn(m[2]), y = new Date(now).getFullYear();
-      let dt = new Date(y, mo, d); if (dayStart(dt.getTime()) < t0) dt = new Date(y + 1, mo, d);
+      const mo = cn(m[1]) - 1, d = cn(m[2]), y = C.date(now).getFullYear();
+      let dt = C.makeDate(y, mo, d); if (dayStart(dt.getTime()) < t0) dt = C.makeDate(y + 1, mo, d);
       return day(dt.getTime(), m[0]);
     }
     if ((m = s.match(/月底|月末/))) {
-      const n = new Date(now); return day(new Date(n.getFullYear(), n.getMonth() + 1, 0).getTime(), m[0], { soft: true });
+      const n = C.date(now); return day(C.makeDate(n.getFullYear(), n.getMonth() + 1, 0).getTime(), m[0], { soft: true });
     }
     if ((m = s.match(new RegExp('(' + NUM + ')[号日]')))) {
-      const n = new Date(now), d = cn(m[1]); let dt = new Date(n.getFullYear(), n.getMonth(), d);
-      if (dayStart(dt.getTime()) < t0) dt = new Date(n.getFullYear(), n.getMonth() + 1, d);
+      const n = C.date(now), d = cn(m[1]); let dt = C.makeDate(n.getFullYear(), n.getMonth(), d);
+      if (dayStart(dt.getTime()) < t0) dt = C.makeDate(n.getFullYear(), n.getMonth() + 1, d);
       return day(dt.getTime(), m[0]);
     }
     if ((m = s.match(/下(?:个)?周/))) {
@@ -972,7 +1047,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     let m = seg.match(/^(.*?)(?:从)?([^到至]+?)(?:到|至)([^出请休旅放培]+?)(?:去|的)?(出差|请假|休假|旅游|旅行|出游|放假|培训)/);
     if (m) {
       const a = parseDate(m[2], now), b = parseDate(m[3], now);
-      if (a && b) { let to = b.ts; if (to < a.ts) to += 7 * DAY; return { from: a.ts, to, label: m[4] }; }
+      if (a && b) { let to = b.ts; if (to < a.ts) to = addDays(to, 7); return { from: a.ts, to, label: m[4] }; }
     }
     m = seg.match(/^(.*?)(今天|明天|后天|周[一二三四五六日天]|下周[一二三四五六日天]|\d+月\d+[日号])(?:一天|全天)?(请假|休假|出差|放假)/);
     if (m) { const a = parseDate(m[2], now); if (a) return { from: a.ts, to: a.ts, label: m[3] }; }
@@ -1025,7 +1100,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
         if (lead) prev.lead = lead.min;
         if (prev.type === 'event') { if (wantPrep) prev.prep = Math.min(120, lead.min); if (travel) prev.travel = travel; }
         if (date && !prev.date) { prev.date = date; }
-        if (clk && prev.type === 'event' && !prev.hasClock) { prev.hasClock = true; prev.start = dayStart(prev.start) + clk.min * MIN; prev.end = prev.start + prev.estMin * MIN; }
+        if (clk && prev.type === 'event' && !prev.hasClock) { prev.hasClock = true; prev.start = C.atMinute(prev.start, clk.min); prev.end = prev.start + prev.estMin * MIN; }
         return;
       }
       if (title.length < 1) return;
@@ -1043,7 +1118,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       const isDeadline = PAYDL.test(title) && !before && !dur && !clk;
       if (isDeadline) {
         d.type = 'deadline'; d.estMin = 0; d.conf = 0.9; d.src = 'stated';
-        d.due = date ? date.ts + DAY - 1 : dayStart(now) + 7 * DAY - 1;
+        d.due = date ? C.dayEnd(date.ts) : addDays(dayStart(now), 7) - 1;
         if (!d.lead) d.lead = domain === 'finance' ? 2 * 1440 : 1440;
         d.status = 'planned';
       } else if (clk && !before) {
@@ -1051,7 +1126,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
         const est = estimate(st, domain, energy, dur ? dur.min : 0, true, title);
         d.statedMin = dur ? dur.min : 0; d.estMin = est.min || (/聚餐|吃饭|疫苗|体检|看病/.test(title) ? 120 : 60); d.conf = est.conf; d.src = est.src;
         const base = date ? date.ts : (clk.min <= (now - dayStart(now)) / MIN ? addDays(dayStart(now), 1) : dayStart(now));
-        d.start = base + clk.min * MIN; d.end = d.start + d.estMin * MIN;
+        d.start = C.atMinute(base, clk.min); d.end = d.start + d.estMin * MIN;
         d.date = d.date || { ts: base };
         if (wantPrep) d.prep = Math.min(120, lead.min);
         if (travel) d.travel = travel;
@@ -1063,9 +1138,9 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
         if (/体检|疫苗|看病|门诊|复诊/.test(title)) d.splittable = false;
         d.minChunk = 60;
         if (date) {
-          if (before) { d.due = date.ts + DAY - 1; }
-          else if (date.range) { d.notBefore = date.range[0]; d.due = date.range[1] + DAY - 1; }
-          else { d.notBefore = date.ts; d.due = date.ts + DAY - 1; }
+          if (before) { d.due = C.dayEnd(date.ts); }
+          else if (date.range) { d.notBefore = date.range[0]; d.due = C.dayEnd(date.range[1]); }
+          else { d.notBefore = date.ts; d.due = C.dayEnd(date.ts); }
           if (date.soft && !date.range && before === false) { delete d.notBefore; }
         } else if (asap) { d.asap = true; }
         if (period && !clk) d.win = PWIN[period];
@@ -1157,7 +1232,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     const we = d != null && isRestDay(d) && S.wknd && S.wknd.on;
     return we ? [S.wknd.start, S.wknd.end] : [S.dayStart, S.dayEnd];
   }
-  const isOff = (S, d) => (S.off || []).some((o) => d >= o.from && d <= o.to);
+  const isOff = (S, d) => (S.off || []).some((o) => { const key = C.dateVal(d); return key >= C.dateVal(o.from, o.timeZone || C.timeZone()) && key <= C.dateVal(o.to, o.timeZone || C.timeZone()); });
   const commuteOn = (S, d) => !!(S.commute && S.commute.on && d != null && !isRestDay(d));
   function winMinutes(S, d) {
     const [a, z] = bounds(S, d);
@@ -1166,7 +1241,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   const dayCap = (S, d) => (d != null && isOff(S, d) ? 0 : Math.round(winMinutes(S, d) * (1 - S.freeRatio)));
   function dayLoad(st, d) {
     let m = 0;
-    st.blocks.forEach((b) => { if (b.start >= d && b.start < d + DAY && live(b) && !b.missed && b.kind !== 'free') m += bmin(b); });
+    st.blocks.forEach((b) => { if (b.end > d && b.start < addDays(d, 1) && live(b) && !b.missed && b.kind !== 'free') m += (Math.min(b.end, addDays(d, 1)) - Math.max(b.start, d)) / MIN; });
     return m;
   }
   const placedMin = (st, id) => st.blocks.reduce((a, b) => a + (b.itemId === id && live(b) ? bmin(b) : 0), 0);
@@ -1176,19 +1251,19 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     const S = st.settings;
     if (isOff(S, d)) return [];
     const [ba, bz] = bounds(S, d);
-    let lo = d + ba * MIN; const hi = d + (bz - S.endBuffer) * MIN;
+    let lo = C.atMinute(d, ba); const hi = C.atMinute(d, bz - S.endBuffer);
     if (dayStart(now) === d) lo = Math.max(lo, ceil15(now));
     if (lo >= hi) return [];
     const occ = [];
     st.blocks.forEach((b) => {
-      if (b.end <= d || b.start >= d + DAY || !live(b) || b.kind === 'free') return;
+      if (b.end <= d || b.start >= addDays(d, 1) || !live(b) || b.kind === 'free') return;
       if (ignore && ignore(b)) return;
       occ.push({ s: b.start, e: b.end, blk: true });
     });
-    if (S.lunchOn) occ.push({ s: d + S.lunch[0] * MIN, e: d + S.lunch[1] * MIN, blk: false });
+    if (S.lunchOn) occ.push({ s: C.atMinute(d, S.lunch[0]), e: C.atMinute(d, S.lunch[1]), blk: false });
     if (commuteOn(S, d)) {
-      occ.push({ s: d + ba * MIN, e: d + (ba + S.commute.am) * MIN, blk: false });
-      occ.push({ s: d + S.commute.pmAt * MIN, e: d + (S.commute.pmAt + S.commute.pm) * MIN, blk: false });
+      occ.push({ s: C.atMinute(d, ba), e: C.atMinute(d, ba + S.commute.am), blk: false });
+      occ.push({ s: C.atMinute(d, S.commute.pmAt), e: C.atMinute(d, S.commute.pmAt + S.commute.pm), blk: false });
     }
     occ.sort((a, b) => a.s - b.s);
     const gaps = []; let cur = lo, curBlk = false;
@@ -1206,11 +1281,11 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   /* ---------- 选槽(核心打分) ---------- */
   function place(st, it, dur, ctx) {
     const S = st.settings, now = ctx.now, startDay = dayStart(now);
-    let first = startDay, last = startDay + 13 * DAY;
+    let first = startDay, last = addDays(startDay, 13);
     if (it.notBefore) first = Math.max(first, dayStart(it.notBefore));
     if (it.due && !it.lateOk) last = Math.max(first, Math.min(last, dayStart(it.due)));
     if (it.due && dayStart(it.due) < startDay) last = first;
-    if (it.start == null && it.due && it.lateOk) last = startDay + 13 * DAY;
+    if (it.start == null && it.due && it.lateOk) last = addDays(startDay, 13);
     const buf = S.buffer * MIN;
     const hold = Math.max(it.hold || 0, ctx.minStart || 0);
     if (hold) first = Math.max(first, dayStart(hold));
@@ -1221,19 +1296,19 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     for (let d = first; d <= last; d = addDays(d, 1)) {
       const load = dayLoad(st, d), cap = dayCap(S, d);
       if (load + dur > cap && !ctx.ignoreCap) continue;
-      const di = Math.round((d - startDay) / DAY);
-      const daysLeft = it.due ? Math.round((dayStart(it.due) - d) / DAY) : null;
+      const di = C.calendarDiff(d, startDay);
+      const daysLeft = it.due ? C.calendarDiff(it.due, d) : null;
       const w = dow(d);
       const hk = dayKind(d), restPen = it.domain === 'work' && (hk === 'holiday' || hk === 'weekend') ? 45 : 0;
       if (it.domain === 'work' && hk === 'holiday' && S.holidayAvoid !== false && !it.allowHoliday && !(daysLeft != null && daysLeft <= 0)) continue;
       const zones = (S.zones || []).filter((z) => z.dow === w);
-      const sameItemToday = st.blocks.some((b) => b.itemId === it.id && live(b) && b.start >= d && b.start < d + DAY);
+      const sameItemToday = st.blocks.some((b) => b.itemId === it.id && live(b) && b.start >= d && b.start < addDays(d, 1));
       for (const g of gapsOf(st, d, now, ign)) {
         let s0 = g.s + (g.lb ? buf : 0);
         if (hold && s0 < hold) s0 = ceil15(hold);
         const e0 = g.e - (g.rb ? buf : 0);
         for (let s = ceil15(s0); s + dur * MIN <= e0; s += 15 * MIN) {
-          const sm = (s - d) / MIN, em = sm + dur;
+          const sm = C.minuteOfDay(s), em = C.minuteOfDay(s + dur * MIN);
           if (zones.some((z) => !isDeep && sm < z.end && em > z.start)) continue;
           const peakOverlap = Math.max(0, Math.min(em, S.peak[1]) - Math.max(sm, S.peak[0]));
           const inPeak = peakOverlap >= dur * 0.8;
@@ -1280,6 +1355,52 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   const kindOf = (it) => (it.type === 'event' ? 'commit' : it.energy === 'deep' ? 'focus' : 'admin');
 
   /* ---------- 习惯生成 ---------- */
+  const occurrenceKey = (h, date) => h.id + '@' + date;
+  const recurringId = (h, date) => 'b' + h.id + 'd' + date.replace(/-/g, '');
+  function occurrenceOf(b, h) {
+    if (!h || !b.hkey || b.hkey.includes('#dup')) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(b.occurrenceDate || '')) return b.occurrenceDate;
+    const prefix = h.id + '@'; if (!b.hkey.startsWith(prefix)) return null;
+    const match = b.hkey.slice(prefix.length).match(/^(\d+)(?:p*|m)$/); if (!match) return null;
+    const midnight = +match[1]; if (!Number.isFinite(midnight) || Math.abs(midnight) > 8640000000000000) return null;
+    const zone = b.timeZone && b.timeZone !== 'system' && C.validTimeZone(b.timeZone) ? b.timeZone : C.inferTimeZone(midnight, h.timeZone);
+    return C.dateVal(midnight, zone);
+  }
+  // 同一次周期安排的身份是「模板 ID + 原定日历日期」,不随显示时区或调课而变化。
+  function repairRecurring(st, versions) {
+    let changed = C.initTimeZones(st), duplicates = 0;
+    const habits = new Map(st.habits.map((h) => [h.id, h])), groups = new Map();
+    st.blocks.forEach((b) => {
+      if (b.duplicateOf) { if (!b.skipped) { b.skipped = true; changed++; } return; }
+      const h = habits.get(b.habitId || b.routineId), date = occurrenceOf(b, h); if (!date) return;
+      if (b.occurrenceDate !== date) { b.occurrenceDate = date; changed++; }
+      if (!b.timeZone) { b.timeZone = h.timeZone; changed++; }
+      if (/m$/.test(b.hkey)) { b.hkey = b.hkey.slice(0, -1); b.moved = true; b.pin = true; b.locked = true; changed++; }
+      if (b.skipped) return;
+      const key = occurrenceKey(h, date); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(b);
+    });
+    const acted = (b) => b.done || b.started ? 3 : b.moved || b.pin || /p+$/.test(b.hkey || '') || /你手动/.test(b.why || '') ? 2 : 0;
+    groups.forEach((group) => {
+      if (group.length < 2) return;
+      const h = habits.get(group[0].habitId || group[0].routineId), date = group[0].occurrenceDate;
+      const expected = C.withTimeZone(h.timeZone, () => {
+        const d = C.parseDateTime(date), ex = (h.ex || []).find((e) => C.dateVal(e.date) === date);
+        return ex && ex.type === 'move' && ex.to ? C.atMinute(ex.to.date, ex.to.start) : h.time == null ? null : C.atMinute(d, h.time);
+      });
+      group.sort((a, b) => acted(b) - acted(a) || (Number(b.start === expected) - Number(a.start === expected)) || ((versions && versions[b.id] || {}).u || 0) - ((versions && versions[a.id] || {}).u || 0) || String(a.id).localeCompare(String(b.id)));
+      const keeper = group[0];
+      group.slice(1).forEach((b) => {
+        // 两条都被明确操作过且内容不同:保留给用户判断,不猜哪次操作正确。
+        if (acted(b) && (b.start !== keeper.start || b.end !== keeper.end || !!b.done !== !!keeper.done || !!b.started !== !!keeper.started || (b.actual || 0) !== (keeper.actual || 0))) return;
+        b.skipped = true; b.duplicateOf = keeper.id; duplicates++; changed++;
+      });
+    });
+    return { changed, duplicates };
+  }
+  function occurrenceSet(st) {
+    const habits = new Map(st.habits.map((h) => [h.id, h]));
+    return new Set(st.blocks.filter((b) => !b.duplicateOf).map((b) => { const h = habits.get(b.habitId || b.routineId), date = occurrenceOf(b, h); return date ? occurrenceKey(h, date) : null; }).filter(Boolean));
+  }
   const HWIN = (S, d) => { const [a, z] = bounds(S, d); return { morning: [a, 11 * 60 + 30], noon: [13 * 60, 15 * 60], evening: [18 * 60, z - S.endBuffer], any: [a, z - S.endBuffer] }; };
   function habitDays(h, ws) {
     if (h.days) return h.days;
@@ -1287,17 +1408,20 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     return [...Array(n)].map((_, i) => Math.floor((i + 0.5) * 7 / n));
   }
   function genHabits(st, now, res, H) {
+    repairRecurring(st);
     H = H || 56;                                   // 周期事项默认往后排 8 周;翻到更远会由 ensureHorizon 补齐
-    const S = st.settings, t0 = dayStart(now), have = new Set(st.blocks.filter((b) => b.hkey && !b.skipped).map((b) => b.hkey));
-    st.habits.forEach((h) => {
+    const S = st.settings, have = occurrenceSet(st);
+    st.habits.forEach((h) => C.withTimeZone(h.timeZone || C.timeZone(), () => {
+      const t0 = dayStart(now);
       if (h.paused || h.routine) return;
-      const mkAt = (d, s, kind, why) => { const key = h.id + '@' + d; st.blocks.push({ id: uid(st, 'b'), habitId: h.id, hkey: key, title: h.title, domain: h.domain, kind, start: s, end: s + h.dur * MIN, locked: !!h.time, ctx: '', why, prio: 2 }); have.add(key); };
+      const keyAt = (d) => occurrenceKey(h, C.dateVal(d));
+      const mkAt = (d, s, kind, why) => { const date = C.dateVal(d); st.blocks.push({ id: recurringId(h, date), habitId: h.id, hkey: h.id + '@' + d, occurrenceDate: date, timeZone: h.timeZone || C.timeZone(), title: h.title, domain: h.domain, kind, start: s, end: s + h.dur * MIN, locked: h.time != null, ctx: '', why, prio: 2 }); have.add(keyAt(d)); };
       const findSlot = (d) => {
         const win = HWIN(S, d), [wa, wb] = win[h.pref] || win.any, dur = h.dur, buf = S.buffer * MIN; let best = null;
         if (dayLoad(st, d) + dur > dayCap(S, d)) return null;
         for (const g of gapsOf(st, d, now)) {
-          const lo = Math.max(g.s + (g.lb ? buf : 0), d + wa * MIN), hi = Math.min(g.e - (g.rb ? buf : 0), d + wb * MIN);
-          for (let s = ceil15(lo); s + dur * MIN <= hi; s += 15 * MIN) { const c = (s - d) / MIN / 60 * 0.3; if (!best || c < best.c) best = { s, c }; }
+          const lo = Math.max(g.s + (g.lb ? buf : 0), C.atMinute(d, wa)), hi = Math.min(g.e - (g.rb ? buf : 0), C.atMinute(d, wb));
+          for (let s = ceil15(lo); s + dur * MIN <= hi; s += 15 * MIN) { const c = C.minuteOfDay(s) / 60 * 0.3; if (!best || c < best.c) best = { s, c }; }
         }
         return best && best.s;
       };
@@ -1305,17 +1429,17 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       if (h.perWeek && !h.days && !h.monthDay && !h.every) {
         /* 「每周 N 次」没有指定星期:逐周挑最空的日子自动落位,某天排满就换一天,而不是跳过 */
         const n = Math.max(1, Math.min(7, h.perWeek));
-        for (let w0 = C.weekStart(t0); w0 < t0 + H * DAY; w0 = addDays(w0, 7)) {
-          const days = []; for (let i = 0; i < 7; i++) { const d = addDays(w0, i); if (d >= t0 && d < t0 + H * DAY && !isOff(S, d) && !restBlocked(d)) days.push(d); }
-          let got = days.filter((d) => have.has(h.id + '@' + d)).length;
+        for (let w0 = C.weekStart(t0); w0 < addDays(t0, H); w0 = addDays(w0, 7)) {
+          const days = []; for (let i = 0; i < 7; i++) { const d = addDays(w0, i); if (d >= t0 && d < addDays(t0, H) && !isOff(S, d) && !restBlocked(d)) days.push(d); }
+          let got = days.filter((d) => have.has(keyAt(d))).length;
           const used = new Set(), prefer = (d) => dayLoad(st, d) + (isRestDay(d) ? 240 : 0) + (h.pref === 'any' && dow(d) >= 5 ? 0 : 0);
           while (got < n) {
-            const cand = days.filter((d) => !have.has(h.id + '@' + d) && !used.has(d)).filter((d) => !used.has(d - DAY) && !used.has(d + DAY) && !have.has(h.id + '@' + (d - DAY)) && !have.has(h.id + '@' + (d + DAY)) || n >= 4).sort((a, b) => prefer(a) - prefer(b));
-            const pool = cand.length ? cand : days.filter((d) => !have.has(h.id + '@' + d) && !used.has(d)).sort((a, b) => prefer(a) - prefer(b));
+            const cand = days.filter((d) => !have.has(keyAt(d)) && !used.has(d)).filter((d) => !used.has(addDays(d, -1)) && !used.has(addDays(d, 1)) && !have.has(keyAt(addDays(d, -1))) && !have.has(keyAt(addDays(d, 1))) || n >= 4).sort((a, b) => prefer(a) - prefer(b));
+            const pool = cand.length ? cand : days.filter((d) => !have.has(keyAt(d)) && !used.has(d)).sort((a, b) => prefer(a) - prefer(b));
             let placed = false;
             for (const d of pool) {
               used.add(d);
-              if (h.time != null) { const s0 = d + h.time * MIN; if (s0 + h.dur * MIN > now && !clashHard(st, s0, s0 + h.dur * MIN)) { mkAt(d, s0, 'admin', '你设定的时间'); placed = true; break; } continue; }
+              if (h.time != null) { const s0 = C.atMinute(d, h.time); if (s0 + h.dur * MIN > now && !clashHard(st, s0, s0 + h.dur * MIN)) { mkAt(d, s0, 'admin', '你设定的时间'); placed = true; break; } continue; }
               const s0 = findSlot(d); if (s0) { mkAt(d, s0, 'admin', '每周 ' + n + ' 次:挑了这周比较空的一天,自动排入'); placed = true; break; }
             }
             if (!placed) { res.habitMiss.push({ habit: h, day: w0 }); break; }
@@ -1326,23 +1450,24 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       }
       const wdays = h.monthDay || h.every ? null : habitDays(h);
       for (let k = 0; k < H; k++) {
-        const d = addDays(t0, k), dd = new Date(d);
-        const hit = h.monthDay ? dd.getDate() === Math.min(h.monthDay, new Date(dd.getFullYear(), dd.getMonth() + 1, 0).getDate())
-          : h.every ? Math.round((d - dayStart(h.anchor || h.createdAt || now)) / DAY) % h.every === 0 : wdays.includes(dow(d));
-        if (!hit || isOff(S, d) || have.has(h.id + '@' + d)) continue;
-        if (h.time != null) { const s0 = d + h.time * MIN; if (s0 + h.dur * MIN > now && !clashHard(st, s0, s0 + h.dur * MIN)) mkAt(d, s0, h.kind === 'commit' ? 'commit' : 'admin', '这是你设定的固定节律'); continue; }
+        const d = addDays(t0, k), dd = C.date(d);
+        const hit = h.monthDay ? dd.getDate() === Math.min(h.monthDay, C.makeDate(dd.getFullYear(), dd.getMonth() + 1, 0).getDate())
+          : h.every ? C.calendarDiff(d, h.anchor || h.createdAt || now) % h.every === 0 : wdays.includes(dow(d));
+        if (!hit || isOff(S, d) || have.has(keyAt(d))) continue;
+        if (h.time != null) { const s0 = C.atMinute(d, h.time); if (s0 + h.dur * MIN > now && !clashHard(st, s0, s0 + h.dur * MIN)) mkAt(d, s0, h.kind === 'commit' ? 'commit' : 'admin', '这是你设定的固定节律'); continue; }
         const s0 = findSlot(d); if (s0) mkAt(d, s0, 'admin', '习惯提前占位,优先级高于普通事务'); else res.habitMiss.push({ habit: h, day: d });
       }
-    });
+    }));
   }
 
   /* ---------- 固定周程 / 课表 ---------- */
-  const weekNo = (st, d) => { const T = st.settings.term; return T && T.start ? Math.floor((C.weekStart(d) - T.start) / (7 * DAY)) + 1 : null; };
+  const weekNo = (st, d) => { const T = st.settings.term; return T && T.start ? Math.floor(C.calendarDiff(C.weekStart(d), C.parseDateTime(C.dateVal(T.start, T.timeZone || C.timeZone()))) / 7) + 1 : null; };
   function parseWeeks(v) {                       // "1-8,10-16周" / [[1,8]] → [[1,8],[10,16]]
     if (Array.isArray(v)) return v.filter((r) => Array.isArray(r) && r.length === 2).map((r) => [+r[0], +r[1]]);
     const out = []; String(v || '').replace(/(\d+)\s*[-~到至]\s*(\d+)|(\d+)/g, (m, a, b, c) => { out.push(a ? [+a, +b] : [+c, +c]); return m; }); return out;
   }
   function routineHit(st, h, d) {
+    if (h.timeZone && h.timeZone !== C.timeZone()) { const label = C.dateVal(d); return C.withTimeZone(h.timeZone, () => routineHit(st, h, C.parseDateTime(label))); }
     if (!h.days || !h.days.includes(dow(d))) return false;
     if (h.from && d < h.from) return false; if (h.until && d > h.until) return false;
     const n = weekNo(st, d);
@@ -1356,53 +1481,45 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   function routineLabel(h) {
     const days = h.days && h.days.length === 7 ? '每天' : h.days && h.days.length === 5 && h.days[4] === 4 ? '工作日' : (h.days || []).map((d) => C.WD[d]).join('、');
     const wk = h.weeks && h.weeks.length ? '第' + h.weeks.map((r) => (r[0] === r[1] ? r[0] : r[0] + '–' + r[1])).join('、') + '周' : '';
-    return days + ' ' + fmtM(h.time) + '–' + fmtM(h.time + h.dur) + (wk ? ' · ' + wk : '') + (h.parity === 'odd' ? ' · 单周' : h.parity === 'even' ? ' · 双周' : '') + (h.loc ? ' · ' + h.loc : '');
+    return days + ' ' + fmtM(h.time) + '–' + fmtM(h.time + h.dur) + (h.timeZone && h.timeZone !== C.selectedTimeZone() ? ' · ' + h.timeZone : '') + (wk ? ' · ' + wk : '') + (h.parity === 'odd' ? ' · 单周' : h.parity === 'even' ? ' · 双周' : '') + (h.loc ? ' · ' + h.loc : '');
   }
   const fmtM = (m) => C.p2(Math.floor(m / 60)) + ':' + C.p2(m % 60);
   /* 固定周程一次生成到学期末(至少 20 周),不再只有两周;翻到更远的周时由 ensureHorizon 补齐 */
   function routineHorizon(st, now) {
     const T = st.settings.term, t0 = dayStart(now); let H = 147;
-    if (T && T.start && T.weeks) H = Math.max(H, Math.ceil((T.start + T.weeks * 7 * DAY - t0) / DAY) + 7);
+    if (T && T.start && T.weeks) H = Math.max(H, Math.ceil((addDays(T.start, T.weeks * 7) - t0) / DAY) + 7);
     return Math.min(H, 320);
   }
   function genRoutines(st, now, res, H) {
-    const S = st.settings, t0 = dayStart(now); H = H || routineHorizon(st, now);
-    const have = new Set(st.blocks.map((b) => b.hkey).filter(Boolean));
-    st.habits.forEach((h) => {
+    repairRecurring(st);
+    const S = st.settings; H = H || routineHorizon(st, now);
+    const have = occurrenceSet(st);
+    st.habits.forEach((h) => C.withTimeZone(h.timeZone || C.timeZone(), () => {
+      const t0 = dayStart(now);
       if (!h.routine || h.paused) return;
-      const mk = (key, s, why) => st.blocks.push({ id: uid(st, 'b'), habitId: h.id, routineId: h.id, hkey: key, title: h.title, domain: h.domain, kind: 'commit', start: s, end: s + h.dur * MIN, locked: true, ctx: '', loc: h.loc || '', why, prio: 2 });
+      const mk = (d, s, why) => { const date = C.dateVal(d); st.blocks.push({ id: recurringId(h, date), habitId: h.id, routineId: h.id, hkey: h.id + '@' + d, occurrenceDate: date, timeZone: h.timeZone, title: h.title, domain: h.domain, kind: 'commit', start: s, end: s + h.dur * MIN, locked: true, ctx: '', loc: h.loc || '', why, prio: 2 }); };
       for (let k = 0; k < H; k++) {
-        const d = addDays(t0, k), key = h.id + '@' + d, ex = h.ex && h.ex.length ? h.ex.find((e) => e.date === d) : null;
-        if (ex && ex.type === 'cancel') { if (have.has(key)) { st.blocks = st.blocks.filter((b) => !(b.hkey === key && !b.done)); have.delete(key); } continue; }
+        const d = addDays(t0, k), key = occurrenceKey(h, C.dateVal(d)), ex = h.ex && h.ex.length ? h.ex.find((e) => e.date === d) : null;
+        if (ex && ex.type === 'cancel') { if (have.has(key)) { st.blocks = st.blocks.filter((b) => !(b.habitId === h.id && occurrenceOf(b, h) === C.dateVal(d) && !b.done && !b.started)); have.delete(key); } continue; }
         if (!routineHit(st, h, d)) continue;
         if (ex && ex.type === 'move') continue;                                   // 原时间不上了,新时间在下面生成
         if (isOff(S, d)) continue;
         if (h.skipHoliday !== false && C.Holiday && C.Holiday.info(d).kind === 'holiday') continue;   // 法定节假日自动停课
         if (have.has(key)) continue;
-        const s = d + h.time * MIN; if (s + h.dur * MIN <= now) continue;
-        mk(key, s, '固定周程:' + routineLabel(h)); have.add(key);
+        const s = C.atMinute(d, h.time); if (s + h.dur * MIN <= now) continue;
+        mk(d, s, '固定周程:' + routineLabel(h)); have.add(key);
       }
       (h.ex || []).filter((e) => e.type === 'move' && e.to).forEach((e) => {
-        if (e.to.date < t0 || e.to.date >= t0 + H * DAY) return;
-        const key = h.id + '@' + e.date; if (st.blocks.some((b) => b.hkey === key && !b.skipped)) return;
-        const s = e.to.date + e.to.start * MIN, dur = (e.to.end || e.to.start + h.dur) - e.to.start; if (s + dur * MIN <= now) return;
-        mk(key, s, '调课:原定 ' + C.dayLabel(e.date, now) + ' ' + fmtM(h.time) + (e.reason ? '(' + e.reason + ')' : '')); st.blocks[st.blocks.length - 1].end = s + dur * MIN;
+        if (e.to.date < t0 || e.to.date >= addDays(t0, H)) return;
+        const key = occurrenceKey(h, C.dateVal(e.date)); if (have.has(key)) return;
+        const s = C.atMinute(e.to.date, e.to.start), dur = (e.to.end || e.to.start + h.dur) - e.to.start; if (s + dur * MIN <= now) return;
+        mk(e.date, s, '调课:原定 ' + C.dayLabel(e.date, now) + ' ' + fmtM(h.time) + (e.reason ? '(' + e.reason + ')' : '')); st.blocks[st.blocks.length - 1].end = s + dur * MIN; have.add(key);
       });
-    });
+    }));
   }
-  /* 修复旧版本拖动周期事项留下的坏记录:拖动后 hkey 被改成「…m」,翻周/重排时原位置会被再补一份。
-     做法:找到同周同习惯的重复块(系统补出来的),删掉它,把它的 hkey 还给被拖动的块。返回修复条数。 */
+  /* 兼容旧启动入口:按原定日期修复,不能把同周的其他正常安排当作重复。 */
   function repairMoved(st) {
-    let n = 0;
-    st.blocks.forEach((b) => {
-      if (!b.habitId || !b.hkey || !/m$/.test(b.hkey) || b.skipped) return;
-      const ws = C.weekStart(b.start);
-      const dup = st.blocks.find((x) => x !== b && x.habitId === b.habitId && !x.skipped && !x.done && !x.started && x.hkey && !/m$/.test(x.hkey) && C.weekStart(x.start) === ws && !x.moved);
-      if (dup) { b.hkey = dup.hkey; dup.skipped = true; dup.hkey = dup.hkey + '#dup'; }
-      else { const h = st.habits.find((y) => y.id === b.habitId); const day = String(b.hkey).replace(/m$/, '').split('@')[1]; b.hkey = b.habitId + '@' + (+day || dayStart(b.start)); }
-      b.moved = true; b.pin = true; b.locked = true; n++;
-    });
-    return n;
+    return repairRecurring(st).changed;
   }
 
   /* 查看更远的日期时,把周期事项补生成到那天(幂等);返回是否新增了块 */
@@ -1433,13 +1550,19 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   }
   function routineException(st, id, ex, now) {
     const h = st.habits.find((x) => x.id === id); if (!h) return null;
-    ex.date = dayStart(ex.date); h.ex = (h.ex || []).filter((e) => e.date !== ex.date).concat([ex]);
-    st.blocks = st.blocks.filter((b) => !(b.hkey === id + '@' + ex.date && !b.done));
+    ex.date = C.parseDateTime(C.dateVal(ex.date), h.timeZone || C.timeZone());
+    if (ex.to) ex.to = { ...ex.to, date: C.parseDateTime(C.dateVal(ex.to.date), h.timeZone || C.timeZone()) };
+    h.ex = (h.ex || []).filter((e) => e.date !== ex.date).concat([ex]);
+    const date = C.dateVal(ex.date, h.timeZone);
+    st.blocks = st.blocks.filter((b) => !(b.habitId === id && occurrenceOf(b, h) === date && !b.done && !b.started));
     return plan(st, now, 'inc');
   }
   function removeRoutineException(st, id, date, now) {
     const h = st.habits.find((x) => x.id === id); if (!h) return null;
-    h.ex = (h.ex || []).filter((e) => e.date !== dayStart(date)); st.blocks = st.blocks.filter((b) => !(b.hkey === id + '@' + dayStart(date) && !b.done));
+    const original = C.withTimeZone(h.timeZone || C.timeZone(), () => dayStart(date));
+    h.ex = (h.ex || []).filter((e) => e.date !== original);
+    const key = C.dateVal(original, h.timeZone);
+    st.blocks = st.blocks.filter((b) => !(b.habitId === id && occurrenceOf(b, h) === key && !b.done && !b.started));
     return plan(st, now, 'inc');
   }
 
@@ -1459,7 +1582,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     return out;
   }
   function addHabit(st, h, now) {
-    h.id = uid(st, 'h'); h.anchor = dayStart(now); st.habits.push(h); return h;
+    h.id = uid(st, 'h'); h.timeZone = h.timeZone || C.timeZone(); h.anchor = dayStart(now); st.habits.push(h); return h;
   }
   /* 编辑已有事项:改完后只重排它自己 */
   function editItem(st, id, patch, now) {
@@ -1485,19 +1608,26 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   function fromICS(text, now) {
     const lines = String(text).replace(/\r?\n[ \t]/g, '').split(/\r?\n/), out = [];
     let cur = null;
-    const pt = (v) => { const m = v.match(/(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?/); return m ? { ts: new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0)).getTime(), allDay: m[4] == null } : null; };
+    const pt = (v, prop) => {
+      const m = v.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?$/); if (!m) return null;
+      const tz = prop.match(/;TZID=(?:"([^"]+)"|([^;]+))/i), zone = m[7] ? 'UTC' : tz ? tz[1] || tz[2] : C.timeZone();
+      if (!C.validTimeZone(zone)) return null;
+      const value = m[1] + '-' + m[2] + '-' + m[3] + (m[4] == null ? '' : 'T' + m[4] + ':' + m[5] + ':' + (m[6] || '00'));
+      const ts = C.parseDateTime(value, m[4] == null ? C.timeZone() : zone);
+      return ts == null ? null : { ts, allDay: m[4] == null };
+    };
     lines.forEach((ln) => {
       if (ln === 'BEGIN:VEVENT') cur = {}; else if (ln === 'END:VEVENT') { if (cur && cur.s) out.push(cur); cur = null; }
       else if (cur) {
         const i = ln.indexOf(':'); if (i < 0) return; const k = ln.slice(0, i).split(';')[0], v = ln.slice(i + 1);
         if (k === 'SUMMARY') cur.title = v.replace(/\\([,;n\\])/g, (m, c) => (c === 'n' ? ' ' : c));
-        else if (k === 'DTSTART') cur.s = pt(v); else if (k === 'DTEND') cur.e = pt(v); else if (k === 'LOCATION') cur.loc = v.replace(/\\(.)/g, '$1');
+        else if (k === 'DTSTART') cur.s = pt(v, ln.slice(0, i)); else if (k === 'DTEND') cur.e = pt(v, ln.slice(0, i)); else if (k === 'LOCATION') cur.loc = v.replace(/\\(.)/g, '$1');
       }
     });
-    return out.filter((e) => e.title && e.s.ts + DAY > now).map((e) => {
+    return out.filter((e) => e.title && (e.e ? e.e.ts : e.s.allDay ? addDays(e.s.ts, 1) : e.s.ts + 60 * MIN) > now).sort((a, b) => a.s.ts - b.s.ts).map((e) => {
       const dom = C.domainOf(e.title), en = C.energyOf(e.title), title = e.title;
       const base = { id: null, raw: title, title, short: title.length > 12 ? title.slice(0, 12) : title, domain: dom, energy: en, ctx: '', priority: 2, status: 'planned', flex: 'fixed', lead: 0, postponed: 0, actual: 0, createdAt: now, source: 'ics', loc: e.loc || '', conf: 0.95, src: 'stated' };
-      if (e.s.allDay) return Object.assign(base, { type: 'deadline', due: e.s.ts + DAY - 1, estMin: 0, lead: 1440 });
+      if (e.s.allDay) return Object.assign(base, { type: 'deadline', due: e.e && e.e.ts > e.s.ts ? e.e.ts - 1 : C.dayEnd(e.s.ts), estMin: 0, lead: 1440 });
       const end = e.e && e.e.ts > e.s.ts ? e.e.ts : e.s.ts + 60 * MIN;
       return Object.assign(base, { type: 'event', start: e.s.ts, end, estMin: Math.round((end - e.s.ts) / MIN), hasClock: true, lead: 15 });
     });
@@ -1506,9 +1636,9 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   /* 休假 / 出差:这些天不排任务;已排的可移动块让位并重排 */
   function addAway(st, from, to, label, now) {
     from = dayStart(from); to = dayStart(to); if (to < from) { const x = from; from = to; to = x; }
-    (st.settings.off = st.settings.off || []).push({ id: uid(st, 'o'), from, to, label: label || '休假' });
+    (st.settings.off = st.settings.off || []).push({ id: uid(st, 'o'), from, to, timeZone: C.timeZone(), label: label || '休假' });
     let moved = 0;
-    st.blocks.forEach((b) => { if (b.kind !== 'commit' && !b.locked && !b.done && !b.started && !b.skipped && b.start >= from && b.start < to + DAY) { b.skipped = true; moved++; } });
+    st.blocks.forEach((b) => { if (b.kind !== 'commit' && !b.locked && !b.done && !b.started && !b.skipped && b.start >= from && b.start < addDays(to, 1)) { b.skipped = true; moved++; } });
     const res = plan(st, now, 'inc'); res.moved = moved; return res;
   }
   function removeAway(st, id, now) { st.settings.off = (st.settings.off || []).filter((o) => o.id !== id); return plan(st, now, 'inc'); }
@@ -1528,7 +1658,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       }
     });
   }
-  const bucket = (ts) => { const h = new Date(ts).getHours(); return h < 12 ? 'am' : h < 18 ? 'pm' : 'eve'; };
+  const bucket = (ts) => { const h = C.date(ts).getHours(); return h < 12 ? 'am' : h < 18 ? 'pm' : 'eve'; };
 
   function snapshot(st, now) {
     const map = {}, per = {};
@@ -1541,6 +1671,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 
   function plan(st, now, mode, opts) {
     opts = opts || {};
+    repairRecurring(st);
     const res = { conflicts: [], habitMiss: [], displaced: [], overload: [], diff: { changed: 0, kept: 0 }, placed: 0 };
     if (!st.settings.aiOn) return res;
     sweepMissed(st, now);
@@ -1723,7 +1854,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     let load = dayLoad(st, d); if (dayStart(b.start) === d && live(b)) load -= dur;
     const over = Math.max(0, load + dur - cap);
     const clash = st.blocks.find((x) => x.id !== b.id && live(x) && x.start < ne && x.end > ns && x.kind !== 'free');
-    const S = st.settings, sm = (ns - d) / MIN;
+    const S = st.settings, sm = C.minuteOfDay(ns);
     const it = b.itemId ? C.itemOf(st, b.itemId) : null;
     const late = it && it.due && ne > it.due + 1 ? Math.ceil((ne - it.due) / DAY) : 0;
     const msgs = [];
@@ -1741,7 +1872,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 
   /* ---------- 复盘与洞察 ---------- */
   function weekStats(st, ws, now) {
-    const we = ws + 7 * DAY; let total = 0, done = 0, deep = 0, task = 0, focusLens = [];
+    const we = addDays(ws, 7); let total = 0, done = 0, deep = 0, task = 0, focusLens = [];
     const per = {}; DOMAIN_KEYS.forEach((k) => (per[k] = { done: 0, plan: 0 }));
     const dayL = {};
     st.blocks.forEach((b) => {
@@ -1768,7 +1899,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     let used = 0; Object.keys(w.dayL).forEach((k) => (used += w.dayL[k]));
     let wmTot = 0; for (let k = 0; k < 7; k++) wmTot += winMinutes(S, addDays(ws, k));
     const free = Math.min(1, (1 - used / wmTot) / S.freeRatio);
-    const plans = st.log.filter((l) => l.kind === 'plan' && l.t >= ws - 7 * DAY && l.total > 0);
+    const plans = st.log.filter((l) => l.kind === 'plan' && l.t >= addDays(ws, -7) && l.total > 0);
     const stab = plans.length ? 1 - plans.reduce((a, l) => a + l.changed / l.total, 0) / plans.length : 1;
     return Math.round(100 * (quota * 0.3 + deep * 0.25 + Math.max(0, free) * 0.25 + stab * 0.2));
   }
@@ -1794,13 +1925,13 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     // 领域失衡
     DOMAIN_KEYS.forEach((k) => {
       const Q = S.quotas[k]; if (!Q.lo) return;
-      const cur = w.per[k].done + w.per[k].plan, prev = C.domainWeek(st, ws - 7 * DAY)[k]; const pv = prev.done + prev.plan;
+      const cur = w.per[k].done + w.per[k].plan, prev = C.domainWeek(st, addDays(ws, -7))[k]; const pv = prev.done + prev.plan;
       if (cur < Q.lo * 0.5 && pv > 0 && pv < Q.lo * 0.5) out.push({ id: 'dom-' + k, title: '领域失衡', text: '连续 2 周「' + DOMAINS[k].name + '」投入低于下限的 50%。', effect: '新增一个每周 2 次、每次 45 分钟的「' + DOMAINS[k].name + '」习惯块', action: { type: 'habit', domain: k, title: DOMAINS[k].name + '时间', perWeek: 2, dur: 45 } });
     });
     // 碎片化
     if (w.focusN >= 4 && w.focusAvg < 60) out.push({ id: 'frag', title: '碎片化', text: '你的深度工作平均被切成 ' + Math.round(w.focusAvg) + ' 分钟一段,低于有效阈值。', effect: '把可拆事项的单块上限提高到 120 分钟', action: { type: 'chunk', val: 120 } });
     // 会议侵蚀
-    let meet = 0; st.blocks.forEach((b) => { if (b.kind === 'commit' && b.domain === 'work' && b.start >= ws && b.start < ws + 7 * DAY && !b.skipped) meet += bmin(b); });
+    let meet = 0; st.blocks.forEach((b) => { if (b.kind === 'commit' && b.domain === 'work' && b.start >= ws && b.start < addDays(ws, 7) && !b.skipped) meet += bmin(b); });
     if (meet >= 480) out.push({ id: 'meet', title: '会议侵蚀', text: '本周会议共 ' + C.fmtH(meet) + ',占据了大部分整块时间。', effect: '把周四 9:00–12:00 设为不可预约的深度工作保护区', action: { type: 'zone', dow: 3, start: 540, end: 720 } });
     // 周总结永远有
     out.push({ id: 'week', title: '本周概览', text: w.total ? '本周已到点的 ' + w.total + ' 个块里,按计划完成了 ' + w.done + ' 个(' + Math.round(w.rate * 100) + '%)。' : '本周还没有到点的计划块,先排几件事再来看。',
@@ -1819,17 +1950,17 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 
   /* 在配额不足的领域补一个块 */
   function topUp(st, domain, min, now) {
-    const [it] = addItems(st, [{ title: DOMAINS[domain].name + '时间', short: DOMAINS[domain].name + '时间', type: 'task', domain, energy: 'low', ctx: '', priority: 2, status: 'planned', flex: 'move', lead: 0, estMin: min, statedMin: min, conf: 0.9, src: 'stated', splittable: false, postponed: 0, actual: 0, createdAt: now, notBefore: dayStart(now), due: C.weekStart(now) + 7 * DAY - 1 }], now);
+    const [it] = addItems(st, [{ title: DOMAINS[domain].name + '时间', short: DOMAINS[domain].name + '时间', type: 'task', domain, energy: 'low', ctx: '', priority: 2, status: 'planned', flex: 'move', lead: 0, estMin: min, statedMin: min, conf: 0.9, src: 'stated', splittable: false, postponed: 0, actual: 0, createdAt: now, notBefore: dayStart(now), due: addDays(C.weekStart(now), 7) - 1 }], now);
     return { item: it, res: plan(st, now, 'inc') };
   }
 
   /* ---------- ICS 导出(接入系统日历,带提醒) ---------- */
   const esc = (s) => String(s).replace(/([,;\\])/g, '\\$1').replace(/\n/g, '\\n');
-  const icsT = (ts) => { const d = new Date(ts); return d.getFullYear() + C.p2(d.getMonth() + 1) + C.p2(d.getDate()) + 'T' + C.p2(d.getHours()) + C.p2(d.getMinutes()) + '00'; };
+  const icsT = (ts) => new Date(ts).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
   function toICS(st) {
     const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Chrono//时序//CN', 'CALSCALE:GREGORIAN', 'X-WR-CALNAME:时序 Chrono'];
-    const stamp = icsT(Date.now()) + 'Z'.slice(0, 0);
-    st.blocks.filter((b) => live(b) && !b.missed && b.kind !== 'free').forEach((b) => {
+    const stamp = icsT(Date.now());
+    st.blocks.filter((b) => live(b) && !b.missed && b.kind !== 'free').sort(C.compareBlocks).forEach((b) => {
       const it = b.itemId ? C.itemOf(st, b.itemId) : null;
       L.push('BEGIN:VEVENT', 'UID:' + b.id + '@chrono', 'DTSTAMP:' + stamp, 'DTSTART:' + icsT(b.start), 'DTEND:' + icsT(b.end),
         'SUMMARY:' + esc(b.title), 'DESCRIPTION:' + esc((DOMAINS[b.domain] ? DOMAINS[b.domain].name : '') + ' · ' + (b.why || '')),
@@ -1837,12 +1968,12 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     });
     st.items.filter((i) => i.type === 'deadline' && i.status === 'planned').forEach((i) => {
       const d = dayStart(i.due), n = addDays(d, 1);
-      const ds = (t) => { const x = new Date(t); return x.getFullYear() + C.p2(x.getMonth() + 1) + C.p2(x.getDate()); };
+      const ds = (t) => { const x = C.date(t); return x.getFullYear() + C.p2(x.getMonth() + 1) + C.p2(x.getDate()); };
       L.push('BEGIN:VEVENT', 'UID:' + i.id + '@chrono', 'DTSTAMP:' + stamp, 'DTSTART;VALUE=DATE:' + ds(d), 'DTEND;VALUE=DATE:' + ds(n), 'SUMMARY:' + esc('到期:' + i.short),
         'BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:' + esc(i.short), 'TRIGGER:-PT' + Math.round((i.lead || 1440) / 1) + 'M', 'END:VALARM', 'END:VEVENT');
     });
     (st.settings.off || []).forEach((o) => {
-      const ds = (t) => { const x = new Date(t); return x.getFullYear() + C.p2(x.getMonth() + 1) + C.p2(x.getDate()); };
+      const ds = (t) => { const x = C.date(t); return x.getFullYear() + C.p2(x.getMonth() + 1) + C.p2(x.getDate()); };
       L.push('BEGIN:VEVENT', 'UID:' + o.id + '@chrono', 'DTSTAMP:' + stamp, 'DTSTART;VALUE=DATE:' + ds(o.from), 'DTEND;VALUE=DATE:' + ds(addDays(o.to, 1)), 'SUMMARY:' + esc(o.label), 'END:VEVENT');
     });
     L.push('END:VCALENDAR'); return L.join('\r\n');
@@ -1851,14 +1982,14 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   function toCSV(st) {
     const rows = [['日期', '开始', '结束', '标题', '领域', '类型', '计划分钟', '实际分钟', '状态']];
     st.blocks.slice().sort((a, b) => a.start - b.start).forEach((b) => {
-      const d = new Date(b.start);
+      const d = C.date(b.start);
       rows.push([d.getFullYear() + '-' + C.p2(d.getMonth() + 1) + '-' + C.p2(d.getDate()), fmtT(b.start), fmtT(b.end), b.title, DOMAINS[b.domain] ? DOMAINS[b.domain].name : '', b.kind, bmin(b), b.actual || '', b.done ? '完成' : b.skipped ? '取消' : b.missed ? '漏做' : '计划']);
     });
     return '﻿' + rows.map((r) => r.map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\n');
   }
 
   const viewRange = (S) => { const w = S.wknd && S.wknd.on; return [Math.min(S.dayStart, w ? S.wknd.start : 1e9), Math.max(S.dayEnd, w ? S.wknd.end : 0)]; };
-  Object.assign(C, { isPinned, clashHard, repairMoved, routineHorizon, genRoutines, genHabits, ensureHorizon, findRoutine, weekNo, parseWeeks, routineHit, routineLabel, addRoutine, refreshRoutine, routineException, removeRoutineException, isRestDay, dayKind, commuteOn, isOff, addAway, removeAway, bounds, viewRange, editItem, fromICS, effMin, dayCap, dayLoad, placedMin, gapsOf, place, plan, addItems, addHabit, removeItem, conflictOptions, applyOption, startBlock, markDone, postpone, skipToday, resolveMissed, dragCost, moveBlock, weekStats, balanceIndex, insights, applyInsight, topUp, toICS, toCSV, sweepMissed, winMinutes, bmin });
+  Object.assign(C, { isPinned, clashHard, repairMoved, repairRecurring, occurrenceOf, routineHorizon, genRoutines, genHabits, ensureHorizon, findRoutine, weekNo, parseWeeks, routineHit, routineLabel, addRoutine, refreshRoutine, routineException, removeRoutineException, isRestDay, dayKind, commuteOn, isOff, addAway, removeAway, bounds, viewRange, editItem, fromICS, effMin, dayCap, dayLoad, placedMin, gapsOf, place, plan, addItems, addHabit, removeItem, conflictOptions, applyOption, startBlock, markDone, postpone, skipToday, resolveMissed, dragCost, moveBlock, weekStats, balanceIndex, insights, applyInsight, topUp, toICS, toCSV, sweepMissed, winMinutes, bmin });
   if (typeof module !== 'undefined') module.exports = C;
 })(typeof window !== 'undefined' ? window : globalThis);
 
@@ -1967,14 +2098,37 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     }
     return out;
   };
-  const dayBlocks = (d) => A.st.blocks.filter((b) => b.start >= d && b.start < d + DAY && !b.skipped && b.kind !== 'free').sort((a, b) => a.start - b.start);
+  const dayBlocks = (d) => C.blocksOn(A.st, d).filter((b) => !b.skipped && b.kind !== 'free');
   A.dayBlocks = dayBlocks;
+  const blockSpan = (b, d) => {
+    const end = C.addDays(d, 1), start = Math.max(d, b.start), stop = Math.min(end, b.end);
+    const a = start === d ? 0 : C.minuteOfDay(start), z = stop === end ? 1440 : C.minuteOfDay(stop);
+    return [a, z > a ? z : Math.min(1440, a + (stop - start) / MIN)];
+  };
+  A.timelineRange = (day, days, base) => {
+    let [a, z] = base;
+    for (let k = 0; k < days; k++) { const d = C.addDays(day, k); dayBlocks(d).forEach((b) => { const [lo, hi] = blockSpan(b, d); a = Math.min(a, Math.floor(lo / 60) * 60); z = Math.max(z, Math.ceil(hi / 60) * 60); }); }
+    return [Math.max(0, a), Math.min(1440, z)];
+  };
+  A.timelineHtml = (d, ppm, a, withSub) => {
+    const blocks = dayBlocks(d).map((b) => { const [lo, hi] = blockSpan(b, d); return { b, lo, hi: Math.max(hi, lo + 24 / ppm) }; }).sort((x, y) => x.lo - y.lo || C.compareBlocks(x.b, y.b));
+    let group = [], until = -1, html = '';
+    const flush = () => {
+      const lanes = [];
+      group.forEach((x) => { let lane = lanes.findIndex((end) => end <= x.lo); if (lane < 0) lane = lanes.length; lanes[lane] = x.hi; x.lane = lane; });
+      group.forEach((x) => { html += blkHtml(x.b, d, ppm, a, withSub, x.lane, lanes.length); }); group = [];
+    };
+    blocks.forEach((x) => { if (x.lo >= until) { flush(); until = -1; } group.push(x); until = Math.max(until, x.hi); }); flush(); return html;
+  };
 
   /* ---------- 渲染框架 ---------- */
   const TABS = [['today', '今天', 'today'], ['plan', '计划', 'plan'], ['life', '领域', 'life'], ['review', '回顾', 'review']];
   A.render = () => {
+    const zone = C.timeZone();
+    if (A._renderZone && A._renderZone !== zone) { A.viewDay = null; A.weekOff = 0; }
+    A._renderZone = zone; C.initTimeZones(A.st);
     C.sweepMissed(A.st, now()); A.applyGlass();
-    { const t = now(); let need = 0; if (A.tab === 'plan') need = C.addDays(C.weekStart(C.addDays(C.weekStart(t), (A.weekOff || 0) * 7)), 7); else if (A.tab === 'today' && A.viewDay != null) need = A.viewDay + DAY; if (need && C.ensureHorizon(A.st, need, t)) C.save(A.st); }
+    { const t = now(); let need = 0; if (A.tab === 'plan') need = C.addDays(C.weekStart(C.addDays(C.weekStart(t), (A.weekOff || 0) * 7)), 7); else if (A.tab === 'today' && A.viewDay != null) need = C.addDays(A.viewDay, 1); if (need && C.ensureHorizon(A.st, need, t)) C.save(A.st); }
     document.body.classList.toggle('nocap', A.tab === 'review');
     $('#nav').innerHTML = '<div class="brand">时序<small>CHRONO</small></div>' + TABS.map(([k, n, i]) => '<button data-act="tab" data-v="' + k + '" ' + (A.tab === k ? 'aria-current="page"' : '') + '>' + ICON[i] + '<span>' + n + '</span></button>').join('');
     const R = { today: A.viewToday, plan: A.viewPlan, life: A.viewLife, review: A.viewReview }[A.tab];
@@ -2016,11 +2170,13 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 
   /* ================= 今天 ================= */
   const hmm = (ts) => C.fmtT(ts);
-  function blkHtml(b, d0, ppm, startMin, withSub) {
-    const dom = DOMAINS[b.domain] || DOMAINS.work, top = ((b.start - d0) / MIN - startMin) * ppm, h = Math.max(((b.end - b.start) / MIN) * ppm - 2, 22);
+  function blkHtml(b, d0, ppm, startMin, withSub, lane = 0, lanes = 1) {
+    const [lo, hi] = blockSpan(b, d0);
+    const dom = DOMAINS[b.domain] || DOMAINS.work, top = (lo - startMin) * ppm, h = Math.max((hi - lo) * ppm - 2, 22);
     const cls = ['blk', b.kind, b.done ? 'done' : '', b.missed && !b.done ? 'missed' : '', b.locked && b.kind !== 'commit' ? 'locked' : '', (b.start <= now() && now() < b.end && !b.done) ? 'now-on' : ''].join(' ');
     const bg = b.kind === 'focus' ? 'background:' + dom.color : b.kind === 'commit' ? '' : 'background:' + tint(dom.color, 0.17);
-    return '<button class="' + cls + '" data-act="blk" data-id="' + b.id + '" data-d="' + d0 + '" style="--c:' + dom.color + ';--pw:' + pw(b.prio == null ? 2 : b.prio) + 'px;top:' + top + 'px;height:' + h + 'px;' + bg + '">' +
+    const position = lanes > 1 ? 'left:calc(' + (lane * 100 / lanes) + '% + 3px);right:auto;width:calc(' + (100 / lanes) + '% - 6px);' : '';
+    return '<button class="' + cls + '" title="' + esc(b.title + ' · ' + C.dayLabel(b.start, now()) + ' ' + hmm(b.start) + '–' + C.dayLabel(b.end, b.start) + ' ' + hmm(b.end)) + '" data-act="blk" data-id="' + b.id + '" data-d="' + d0 + '" style="--c:' + dom.color + ';--pw:' + pw(b.prio == null ? 2 : b.prio) + 'px;top:' + top + 'px;height:' + h + 'px;' + position + bg + '">' +
       '<span class="t">' + (b.done ? '✓ ' : '') + esc(b.title) + '</span>' + (withSub && h > 40 ? '<span class="s">' + hmm(b.start) + '–' + hmm(b.end) + ' · ' + dom.name + '</span>' : '') + (b.kind !== 'commit' && !b.done && h >= 34 ? '<i class="rz" aria-hidden="true"></i>' : '') + '</button>';
   }
   A.blkHtml = blkHtml;
@@ -2172,9 +2328,9 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
         : '<div class="small muted" style="margin-top:8px">' + (c.state === 'ok' ? '✓ 已确认' : '已放进收件箱') + '</div>') + '</div>';
   }
   const p2 = C.p2;
-  const dateVal = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); };
-  const timeVal = (ts) => { const d = new Date(ts); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
-  const parseDateVal = (v) => { const [y, m, d] = v.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
+  const dateVal = (ts) => { const d = C.date(ts); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); };
+  const timeVal = (ts) => { const d = C.date(ts); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
+  const parseDateVal = (v) => C.parseDateTime(v);
   A.dateVal = dateVal; A.timeVal = timeVal; A.parseDateVal = parseDateVal;
 
   A.drawReceipt = () => {
@@ -2199,7 +2355,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       else if (v === 'wk') { d.due = C.addDays(ws, 7) - 1; }
       else if (v === 'nx') { d.notBefore = C.addDays(ws, 7); d.due = C.addDays(ws, 14) - 1; }
       else if (v === 'we') { d.notBefore = C.addDays(ws, 5); d.due = C.addDays(ws, 7) - 1; }
-      else { d.due = C.addDays(t0, +v) + DAY - 1; if (v === '0') d.notBefore = t0; }
+      else { d.due = C.dayEnd(C.addDays(t0, +v)); if (v === '0') d.notBefore = t0; }
     }
     c.edits++; c.field = null;
   };
@@ -2248,7 +2404,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   };
   A.releaseSheet = (d) => {
     d = +d; const st = A.st, t = now();
-    const bl = st.blocks.filter((b) => b.start >= d && b.start < d + DAY && !b.skipped && b.itemId && b.kind !== 'commit' && !b.locked && !b.done && b.end > t)
+    const bl = st.blocks.filter((b) => b.start >= d && b.start < C.addDays(d, 1) && !b.skipped && b.itemId && b.kind !== 'commit' && !b.locked && !b.done && b.end > t)
       .sort((a, b) => (b.prio - a.prio) || (C.bmin(b) - C.bmin(a)));
     const un = A.unplaced().filter((i) => i.due && C.dayStart(i.due) === d);
     A.sheet('<h3>' + C.WD[C.dow(d)] + '的释放方案</h3><div class="lead">挑几件挪到别的天,或直接放掉。越早做减法越轻松。</div>' +
@@ -2268,7 +2424,38 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   const { $, esc, now, tint, hmm } = A;
   const S = () => A.st.settings;
   const pt2 = (v) => { const m = String(v || '').match(/^(\d{1,2}):(\d{2})/); return m ? +m[1] * 60 + +m[2] : null; };
-  const fmtMD = (ts) => { const d = new Date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日'; };
+  const fmtMD = (ts) => { const d = C.date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日'; };
+
+  const zoneNames = { 'Asia/Shanghai': '北京', 'Asia/Taipei': '台北', 'Asia/Hong_Kong': '香港', 'Asia/Tokyo': '东京', 'Asia/Singapore': '新加坡', 'Asia/Kolkata': '新德里', 'Asia/Kathmandu': '加德满都', 'Asia/Dubai': '迪拜', 'Europe/London': '伦敦', 'Europe/Paris': '巴黎', 'America/New_York': '纽约', 'America/Chicago': '芝加哥', 'America/Denver': '丹佛', 'America/Los_Angeles': '洛杉矶', 'Australia/Sydney': '悉尼', 'Pacific/Auckland': '奥克兰', 'UTC': 'UTC' };
+  const zoneLabel = (zone) => zoneNames[zone] || zone.replace(/_/g, ' ');
+  const zoneOptions = (selected) => {
+    const common = Object.keys(zoneNames), all = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
+    const options = [...new Set(['system', ...common, selected, ...all].filter(Boolean))];
+    return options.map((z) => '<option value="' + esc(z) + '" ' + (z === selected ? 'selected' : '') + '>' + esc(z === 'system' ? '跟随设备 · ' + zoneLabel(C.systemTimeZone()) : zoneLabel(z) + (zoneNames[z] && z !== 'UTC' ? ' · ' + z : '')) + '</option>').join('');
+  };
+  A.timeZoneButton = () => '<button class="btn sm timezone-button" data-act="timezone" title="切换时区" aria-label="切换时区">' + esc(zoneLabel(C.timeZone())) + '</button>';
+  A.timeZoneSheet = () => {
+    A.sheet('<h3>时区与安排</h3><div class="lead">切换后,日期、时间轴和新录入的事项都使用所选时区。会议保持实际发生时刻,固定课表和习惯保留原时区。此选择仅用于本设备,同步不会更改其他设备的显示时区。</div><label class="field" for="timeZoneChoice">当前时区</label><select id="timeZoneChoice">' + zoneOptions(S().timeZone || 'system') + '</select><div id="timeZonePreview" class="small muted" style="margin-top:10px"></div><label class="switch"><span><b>按当地作息重排待办</b><span class="small muted" style="display:block">仅重排未来未开始、未锁定的普通待办;可撤销。</span></span><input id="timeZoneReplan" type="checkbox"></label><button class="btn pri" style="width:100%;margin-top:14px" data-act="timezone-apply">应用时区</button>');
+    A.timeZonePreview();
+  };
+  A.timeZonePreview = () => {
+    const input = $('#timeZoneChoice'), out = $('#timeZonePreview'); if (!input || !out) return;
+    out.textContent = C.withTimeZone(input.value || S().timeZone, () => '当地现在: ' + C.dateVal(now()) + ' ' + C.fmtT(now()));
+  };
+  document.addEventListener('change', (e) => { if (e.target.id === 'timeZoneChoice') A.timeZonePreview(); });
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-act]'); if (!el) return;
+    if (el.dataset.act === 'timezone') A.timeZoneSheet();
+    else if (el.dataset.act === 'timezone-apply') {
+      const zone = $('#timeZoneChoice').value, replan = $('#timeZoneReplan').checked;
+      if (zone !== 'system' && !C.validTimeZone(zone)) { A.toast('请选择有效的时区。'); return; }
+      A.closeSheet();
+      A.mutate(() => {
+        C.changeTimeZone(A.st, zone); A.viewDay = null; A.weekOff = 0;
+        if (replan && A.st.settings.aiOn) { A.st.blocks.forEach((b) => { if (b.itemId && !b.habitId && b.kind !== 'commit' && !b.locked && !C.isPinned(b) && !b.done && !b.started && b.start > now()) b.skipped = true; }); C.plan(A.st, now(), 'inc'); }
+      }, '已切换到' + zoneLabel(C.resolveTimeZone(zone)) + (replan && A.st.settings.aiOn ? ',待办已按当地作息重排。' : replan ? '。自动排程已关闭,原安排已保留。' : '。'));
+    }
+  });
 
   A.download = (name, mime, text) => {
     const url = URL.createObjectURL(new Blob([text], { type: mime }));
@@ -2279,10 +2466,10 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   /* ================= 计划 ================= */
   const PPM = 0.72;
   A.viewPlan = () => {
-    const st = A.st, t = now(), s = S(), ws = C.addDays(C.weekStart(t), A.weekOff * 7), [a, z] = C.viewRange(s);
+    const st = A.st, t = now(), s = S(), ws = C.addDays(C.weekStart(t), A.weekOff * 7), [a, z] = A.timelineRange(ws, 7, C.viewRange(s));
     const H = (z - a) * PPM, today = C.dayStart(t);
     let h = '<div class="weekbar"><button class="btn sm" data-act="week" data-v="-1">‹ 上一周</button><button class="btn sm" data-act="week" data-v="0">本周</button><button class="btn sm" data-act="week" data-v="1">下一周 ›</button><span class="grow"></span>' +
-      '<button class="btn sm" data-act="replan">重新排程</button><button class="btn sm" data-act="ics">导出到日历</button></div>';
+      A.timeZoneButton() + '<button class="btn sm" data-act="replan">重新排程</button><button class="btn sm" data-act="ics">导出到日历</button></div>';
     h += '<div class="legend"><span><i style="background:#3E5C9A"></i>专注块(实色)</span><span><i style="background:' + tint('#3E5C9A', .25) + '"></i>事务块(浅色)</span><span><i style="border:1.5px solid #3E5C9A"></i>承诺块(描边)</span><span><i style="border:1px dashed #8A949D"></i>留白</span><span>左侧细带 = 优先级</span></div>';
     h += '<div class="wk" data-a="' + a + '" data-z="' + z + '" data-ppm="' + PPM + '"><div class="wk-in"><div class="wk-h"></div>';
     for (let k = 0; k < 7; k++) {
@@ -2297,8 +2484,8 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       for (let m = Math.ceil(a / 60) * 60; m <= z; m += 60) inner += '<div class="hl" style="top:' + ((m - a) * PPM) + 'px"></div>';
       if (s.lunchOn) inner += '<div class="lunch" style="top:' + ((s.lunch[0] - a) * PPM) + 'px;height:' + ((s.lunch[1] - s.lunch[0]) * PPM - 2) + 'px"></div>';
       (s.zones || []).filter((zn) => zn.dow === k).forEach((zn) => { inner += '<div style="position:absolute;left:0;right:0;top:' + ((zn.start - a) * PPM) + 'px;height:' + ((zn.end - zn.start) * PPM) + 'px;background:repeating-linear-gradient(135deg,transparent 0 5px,var(--rule2) 5px 6px);pointer-events:none"></div>'; });
-      inner += A.dayBlocks(d).map((b) => A.blkHtml(b, d, PPM, a, false)).join('');
-      if (d === today) { const nm = (t - d) / MIN; if (nm >= a && nm <= z) inner += '<div class="nowline" style="left:0;top:' + ((nm - a) * PPM) + 'px"></div>'; }
+      inner += A.timelineHtml(d, PPM, a, false);
+      if (d === today) { const nm = C.minuteOfDay(t); if (nm >= a && nm <= z) inner += '<div class="nowline" style="left:0;top:' + ((nm - a) * PPM) + 'px"></div>'; }
       h += '<div class="wk-col ' + (d === today ? 'today' : '') + (C.isOff(s, d) ? ' away' : '') + '" data-col="' + d + '" style="height:' + H + 'px">' + inner + '</div>';
     }
     h += '</div></div><div class="faint tiny" style="margin:6px 2px">拖动块可手动调整(手机上长按再拖),拖的时候会实时告诉你代价。点一下看「为什么排在这里」。</div>';
@@ -2335,7 +2522,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       const r = col.getBoundingClientRect(), g = geo();
       let min = (cy - r.top - D.grab) / g.ppm + g.a; min = Math.round(min / SNAP) * SNAP;
       min = Math.max(g.a, Math.min(g.z - D.dur, min));
-      return { col, day: +col.dataset.col, start: +col.dataset.col + min * MIN, r };
+      return { col, day: +col.dataset.col, start: C.atMinute(+col.dataset.col, min), r };
     };
     const begin = (e, el, resize) => {
       const b = A.st.blocks.find((x) => x.id === el.dataset.id); if (!b) return null;
@@ -2360,9 +2547,9 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       const m = msgEl();
       if (D.resize) {
         const r = (isWk ? D.el.parentNode : D.root).getBoundingClientRect();
-        const sMin = (D.b.start - C.dayStart(D.b.start)) / MIN;
+        const sMin = C.minuteOfDay(D.b.start);
         let em = (cy - r.top) / g.ppm + g.a; em = Math.round(em / SNAP) * SNAP; em = Math.max(sMin + 15, Math.min(g.z, em));
-        D.newEnd = C.dayStart(D.b.start) + em * MIN;
+        D.newEnd = C.atMinute(D.b.start, em);
         D.el.style.height = Math.max((em - sMin) * g.ppm - 2, 22) + 'px';
         const clash = A.st.blocks.find((x) => x.id !== D.b.id && !x.skipped && x.kind !== 'free' && x.start < D.newEnd && x.end > D.b.start);
         m.className = 'dragmsg' + (clash ? ' bad' : ''); m.textContent = hmm(D.b.start) + ' – ' + hmm(D.newEnd) + ' · ' + C.fmtDur(Math.round((D.newEnd - D.b.start) / MIN)) + (clash ? ' · 与「' + clash.title + '」重叠' : '');
@@ -2437,7 +2624,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   };
   A.manualSheet = (id) => {
     const it = C.itemOf(A.st, id); if (!it) return;
-    const d = new Date(Math.max(now(), C.dayStart(now()) + S().dayStart * MIN)); d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
+    const d = C.date(C.ceil15(Math.max(now(), C.atMinute(now(), S().dayStart))));
     A.sheet('<h3>手动放置「' + esc(it.short) + '」</h3><div class="lead">你自己选时间,系统不会再动它。</div><input type="datetime-local" id="manDt" value="' + A.dateVal(d.getTime()) + 'T' + A.timeVal(d.getTime()) + '"><button class="btn pri" style="width:100%;margin-top:12px" data-act="manual-ok" data-id="' + id + '">放在这里</button>');
   };
 
@@ -2464,7 +2651,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     h += '<h2>生活平衡指数</h2><div class="card score"><div class="big">' + bi + '</div><div class="bars">' + bar('配额达成', qn ? qa / qn : 1) + bar('深度工作', w.deepShare / 0.3) + bar('留白充足', (1 - used / (wm * 7)) / S().freeRatio) + bar('计划稳定', stab) + '</div></div><div class="faint tiny" style="margin:6px 2px">不是 KPI,也不排名。只有连续两周下降时,系统才会说一句「最近有点偏」。</div>';
 
     // 节律热力图
-    const grid = {}; st.blocks.forEach((b) => { if (b.skipped || b.kind === 'free' || b.missed) return; const d = new Date(b.start); const k = C.dow(b.start) + ':' + d.getHours(); grid[k] = (grid[k] || 0) + Math.min(60, C.bmin(b)); });
+    const grid = {}; st.blocks.forEach((b) => { if (b.skipped || b.kind === 'free' || b.missed) return; const d = C.date(b.start); const k = C.dow(b.start) + ':' + d.getHours(); grid[k] = (grid[k] || 0) + Math.min(60, C.bmin(b)); });
     let hm = '<div class="heat"><div></div>' + C.WD.map((x) => '<div style="text-align:center">' + x.slice(1) + '</div>').join('');
     const vr = C.viewRange(S());
     for (let hr = Math.floor(vr[0] / 60); hr < Math.ceil(vr[1] / 60); hr++) {
@@ -2516,7 +2703,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     let any = false, rows = '';
     for (let k = 0; k < 14; k++) {
       const d = C.addDays(C.dayStart(t), -k), per = {}; let tot = 0;
-      st.blocks.forEach((b) => { if (b.done && b.start >= d && b.start < d + DAY) { const m = b.actual || C.bmin(b); per[b.domain] = (per[b.domain] || 0) + m; tot += m; } });
+      st.blocks.forEach((b) => { if (b.done && b.start >= d && b.start < C.addDays(d, 1)) { const m = b.actual || C.bmin(b); per[b.domain] = (per[b.domain] || 0) + m; tot += m; } });
       if (tot) any = true;
       rows += '<div class="led"><span class="muted">' + (k === 0 ? '今天' : fmtMD(d).replace('月', '/').replace('日', '')) + '</span><div class="stk">' + DOMAIN_KEYS.map((x) => per[x] ? '<i style="width:' + Math.min(100, per[x] / 600 * 100) + '%;background:' + DOMAINS[x].color + '"></i>' : '').join('') + '</div><span class="muted" style="text-align:right">' + (tot ? C.fmtH(tot) : '—') + '</span></div>';
     }
@@ -2539,7 +2726,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   A.evening = () => {
     const t = now(), d0 = C.dayStart(t), all = A.dayBlocks(d0).filter((b) => b.kind !== 'commit');
     const done = all.filter((b) => b.done).length;
-    const open = A.st.blocks.filter((b) => !b.done && !b.skipped && b.itemId && b.kind !== 'commit' && (b.missed || (b.start >= d0 && b.start < d0 + DAY && b.end <= t + 3 * 3600e3)) && b.start < d0 + DAY).slice(0, 8);
+    const open = A.st.blocks.filter((b) => !b.done && !b.skipped && b.itemId && b.kind !== 'commit' && (b.missed || (b.start >= d0 && b.start < C.addDays(d0, 1) && b.end <= t + 3 * 3600e3)) && b.start < C.addDays(d0, 1)).sort(C.compareBlocks).slice(0, 8);
     const tmr = A.dayBlocks(C.addDays(d0, 1)).filter((b) => b.itemId && b.kind !== 'commit');
     A.sheet('<h3>今天收个尾</h3><div class="lead">完成 ' + done + ' / ' + all.length + ' 件。没做完是排程的问题,不是你的问题。</div>' +
       (open.length ? '<div class="small muted" style="margin-bottom:6px">没做完的 ' + open.length + ' 件,怎么处理?</div>' + open.map((b) => '<div class="card"><b>' + esc(b.title) + '</b> <span class="small muted">' + C.dayLabel(b.start, t) + ' ' + hmm(b.start) + '</span><div class="chips" style="margin-top:8px"><button class="chip" data-act="ev-res" data-id="' + b.id + '" data-k="tomorrow">明天</button><button class="chip" data-act="ev-res" data-id="' + b.id + '" data-k="week">本周内</button><button class="chip" data-act="ev-res" data-id="' + b.id + '" data-k="drop">放弃</button></div></div>').join('') : '<div class="card muted">没有遗留。</div>') +
@@ -2570,6 +2757,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     const sw = (k, label, sub) => '<div class="switch"><div><b>' + label + '</b><div class="small muted">' + sub + '</div></div><input type="checkbox" data-set="' + k + '" ' + (s[k] ? 'checked' : '') + ' style="width:22px;height:22px;min-height:0"></div>';
     const standalone = G.matchMedia && G.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
     A.sheet('<h3>设置</h3><div class="lead">所有数据只存在这台设备上。</div>' +
+      '<div class="switch"><div><b>时区与安排</b><div class="small muted">当前: ' + esc(zoneLabel(C.timeZone())) + ' · 新录入按此时区理解</div></div>' + A.timeZoneButton() + '</div>' +
       '<label class="field">液态玻璃</label><div class="row" style="gap:10px"><span class="small muted">通透</span><input type="range" min="0" max="1" step="0.05" data-set="glass" value="' + (s.glass == null ? 0.5 : s.glass) + '" class="grow" aria-label="玻璃透明度"><span class="small muted">磨砂</span></div>' +
       '<label class="field">起床 / 开始可用</label><input type="time" data-set="dayStart" value="' + tv(s.dayStart) + '">' +
       '<label class="field">睡觉 / 结束可用(睡眠是硬约束)</label><input type="time" data-set="dayEnd" value="' + tv(s.dayEnd) + '">' +
@@ -2588,7 +2776,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       '<div class="row" style="margin-top:14px;gap:8px;flex-wrap:wrap"><button class="btn" data-act="replan">按新设置重新排程</button><button class="btn" data-act="morning">晨间 60 秒</button></div>' +
       '<h2 style="margin-top:20px">数据归你</h2><div class="row" style="flex-wrap:wrap;gap:8px"><button class="btn sm" data-act="ics">导出日历 .ics</button><button class="btn sm" data-act="csv">导出 CSV</button><button class="btn sm" data-act="json">导出 JSON</button><button class="btn sm" data-act="import">导入 JSON</button><button class="btn sm" data-act="import-ics">导入 .ics 日程</button><button class="btn sm warn" data-act="wipe">一键删除全部数据</button></div>' +
       '<h2 style="margin-top:20px">多设备同步</h2>' + (A.Sync ? A.Sync.settingsHtml() : '') + '<h2 style="margin-top:20px">账号与授权</h2>' + (A.Remote ? A.Remote.html() : '') + '<h2 style="margin-top:20px">安装到设备</h2><div class="small muted">' + (standalone ? '已作为应用运行。' : (A._installEvt ? '<button class="btn sm now" data-act="install">安装到这台设备</button><br>' : '') + 'iPhone / iPad:用 Safari 打开 → 分享 → 「添加到主屏幕」。Android / 电脑:浏览器菜单 → 「安装应用」。') + '</div>' +
-      '<div class="small faint" style="margin-top:14px">时序 Chrono v1.0 · 本地优先 · 无账号 · 无云端</div>');
+      '<div class="small faint" style="margin-top:14px">时序 Chrono v1.5.5 · 本地优先</div>');
   };
 
   A.setSetting = (k, v) => {
@@ -2601,8 +2789,8 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
         const a = k === 'lunchA' ? mm : s.lunch[0], b = k === 'lunchB' ? mm : s.lunch[1];
         if (b - a < 15 || a < s.dayStart || b > s.dayEnd) { A.toast('午休至少 15 分钟,并且要在可用时段(' + C.fmtM(s.dayStart) + '–' + C.fmtM(s.dayEnd) + ')之内。'); return; }
         s.lunch = [a, b];
-        const t = now(), hit = A.st.blocks.some((x) => !x.skipped && !x.done && !x.started && x.kind !== 'commit' && !C.isPinned(x) && x.start >= t && !x.habitId && C.Holiday !== null && [0, 1].length && (() => { const d0 = C.dayStart(x.start), ls = d0 + a * MIN, le = d0 + b * MIN; return x.start < le && x.end > ls; })());
-        if (hit) { A.st.blocks.forEach((x) => { if (!x.skipped && !x.done && !x.started && x.kind !== 'commit' && !C.isPinned(x) && x.start >= t && !x.habitId) { const d0 = C.dayStart(x.start); if (x.start < d0 + b * MIN && x.end > d0 + a * MIN) x.skipped = true; } }); C.plan(A.st, t, 'inc'); }
+        const t = now(), hit = A.st.blocks.some((x) => !x.skipped && !x.done && !x.started && x.kind !== 'commit' && !C.isPinned(x) && x.start >= t && !x.habitId && C.Holiday !== null && [0, 1].length && (() => { const d0 = C.dayStart(x.start), ls = C.atMinute(d0, a), le = C.atMinute(d0, b); return x.start < le && x.end > ls; })());
+        if (hit) { A.st.blocks.forEach((x) => { if (!x.skipped && !x.done && !x.started && x.kind !== 'commit' && !C.isPinned(x) && x.start >= t && !x.habitId) { const d0 = C.dayStart(x.start); if (x.start < C.atMinute(d0, b) && x.end > C.atMinute(d0, a)) x.skipped = true; } }); C.plan(A.st, t, 'inc'); }
       }
       else if (k === 'ltOn') s.ltRemind = Object.assign({ time: 540, evening: false }, s.ltRemind, { on: !!v });
       else if (k === 'ltEve') s.ltRemind = Object.assign({ time: 540, on: true }, s.ltRemind, { evening: !!v });
@@ -2661,8 +2849,8 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       const id = el.dataset.id, it = C.itemOf(A.st, id); if (!it) return; const g = (i) => { const n = $(i); return n ? n.value : null; };
       const patch = { title: (g('#edTitle') || it.title).trim() || it.title, priority: +g('#edPri'), domain: g('#edDom') };
       if (g('#edDur') != null) { const m = C.parseDurText(g('#edDur')); if (m == null) { A.toast('时长没看懂。试试「90 分钟」「1.5 小时」或「1:30」。'); return; } patch.estMin = m; }
-      if (it.type === 'event') { const dd = g('#edDate'), tt = g('#edTime'); if (dd && tt) { const [h, m] = tt.split(':').map(Number); patch.start = A.parseDateVal(dd) + (h * 60 + m) * MIN; patch.end = patch.start + (patch.estMin || it.estMin) * MIN; } patch.prep = +g('#edPrep') || 0; patch.travel = +g('#edTravel') || 0; patch.loc = (g('#edLoc') || '').trim(); }
-      if (it.type !== 'event') { const du = g('#edDue'); if (du) patch.due = A.parseDateVal(du) + DAY - 1; else if (it.type === 'task') patch.due = null; }
+      if (it.type === 'event') { const dd = g('#edDate'), tt = g('#edTime'); if (dd && tt) { const [h, m] = tt.split(':').map(Number); patch.start = C.atMinute(A.parseDateVal(dd), h * 60 + m); patch.end = patch.start + (patch.estMin || it.estMin) * MIN; } patch.prep = +g('#edPrep') || 0; patch.travel = +g('#edTravel') || 0; patch.loc = (g('#edLoc') || '').trim(); }
+      if (it.type !== 'event') { const du = g('#edDue'); if (du) patch.due = C.dayEnd(A.parseDateVal(du)); else if (it.type === 'task') patch.due = null; }
       if (it.type === 'task') patch.after = g('#edAfter') || null;
       A.closeSheet(); let r;
       A.mutate(() => { r = C.editItem(A.st, id, patch, now()); }, '已更新。其余块未改动。');
@@ -2702,7 +2890,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       const sa = pt2(($('#btA') || {}).value), sb = pt2(($('#btB') || {}).value);
       if (sa == null || sb == null) { A.toast('请选择开始和结束时间。'); return; }
       if (sb - sa < 5) { A.toast('结束时间要晚于开始时间(至少 5 分钟)。'); return; }
-      const d0 = C.dayStart(b.start), ns = d0 + sa * MIN, ne = d0 + sb * MIN;
+      const d0 = C.dayStart(b.start), ns = C.atMinute(d0, sa), ne = C.atMinute(d0, sb);
       const clash = st.blocks.find((x) => x.id !== b.id && !x.skipped && x.kind !== 'free' && x.start < ne && x.end > ns);
       A.mutate(() => { b.start = ns; b.end = ne; b.locked = true; b.moved = true; b.why = '你手动设定了时间,系统不会再动它'; }); A.openBlock(b.id);
       A.toast(clash ? '已设为 ' + hmm(ns) + '–' + hmm(ne) + ',但与「' + clash.title + '」重叠了。' : '已设为 ' + hmm(ns) + '–' + hmm(ne) + '。');
@@ -2764,7 +2952,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     A.sheet('<h3>' + (nw ? '添加固定周程' : '管理「' + esc(d.title) + '」') + '</h3><div class="lead">每周自动出现的安排,是硬约束(别人的时间),其他事项会绕开它。同一门课每周有几个不同时间,就各加一条同名的。</div>' +
       '<label class="field">名称</label><input type="text" id="rtTitle" value="' + esc(d.title) + '">' +
       '<label class="field">星期</label><div class="chips" id="rtDays">' + C.WD.map((x, i) => '<button class="chip" data-act="rt-day" data-d="' + i + '" aria-pressed="' + (d.days || []).includes(i) + '">' + x.slice(1) + '</button>').join('') + '</div>' +
-      '<label class="field">上课 / 下课</label><div class="row"><input type="time" id="rtA" value="' + C.fmtM(d.time) + '"><input type="time" id="rtB" value="' + C.fmtM(d.time + d.dur) + '"></div>' +
+      '<label class="field">上课 / 下课 · ' + esc(zoneLabel(d.timeZone || C.timeZone())) + '</label><div class="row"><input type="time" id="rtA" value="' + C.fmtM(d.time) + '"><input type="time" id="rtB" value="' + C.fmtM(d.time + d.dur) + '"></div>' +
       '<label class="field">周次(可选,如 1-8,10-16;需要先设置学期)</label><input type="text" id="rtWk" value="' + wk + '" placeholder="不填 = 整个学期" autocomplete="off">' +
       '<label class="field">单双周</label><select id="rtPar"><option value="all" ' + (d.parity === 'all' ? 'selected' : '') + '>每周</option><option value="odd" ' + (d.parity === 'odd' ? 'selected' : '') + '>仅单周</option><option value="even" ' + (d.parity === 'even' ? 'selected' : '') + '>仅双周</option></select>' +
       '<label class="field">地点</label><input type="text" id="rtLoc" value="' + esc(d.loc || '') + '">' +
@@ -2802,7 +2990,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       const dv = $('#tmDate').value, wv = +$('#tmWeek').value, tot = +$('#tmTotal').value || 18; let start = null;
       if (dv) start = C.weekStart(A.parseDateVal(dv)); else if (wv >= 1) start = C.addDays(C.weekStart(C.dayStart(t)), -(wv - 1) * 7);
       if (start == null) { A.toast('请填写第 1 周的周一,或今天是第几周。'); return; }
-      A.closeSheet(); A.mutate(() => { st.settings.term = { start, weeks: tot }; C.plan(st, t, 'full'); }, '已设置学期。');
+      A.closeSheet(); A.mutate(() => { st.settings.term = { start, weeks: tot, timeZone: C.timeZone() }; C.plan(st, t, 'full'); }, '已设置学期。');
     } else if (a === 'term-clear') { A.closeSheet(); A.mutate(() => { st.settings.term = null; C.plan(st, t, 'full'); }, '已清除学期设置。'); }
   });
 
@@ -2855,8 +3043,8 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   const C = G.Chrono, A = G.A, { MIN, DAY, DOMAINS } = C;
   const { $, esc, now, hmm, KIND, ICON } = A;
   const S = () => A.st.settings;
-  const fmtMD = (ts) => { const d = new Date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日'; };
-  const MONTH = (ts) => new Date(ts).getFullYear() + ' 年 ' + (new Date(ts).getMonth() + 1) + ' 月';
+  const fmtMD = (ts) => { const d = C.date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日'; };
+  const MONTH = (ts) => C.date(ts).getFullYear() + ' 年 ' + (C.date(ts).getMonth() + 1) + ' 月';
 
   A.viewDay = null;   // null = 今天
 
@@ -2873,7 +3061,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     let h = '<div class="strip glass" role="tablist" aria-label="选择日期"><button class="sn" data-act="day-nav" data-v="-7" aria-label="上一周">‹</button>';
     for (let k = 0; k < 7; k++) {
       const d = C.addDays(ws, k), load = C.dayLoad(A.st, d), cap = C.dayCap(s, d), p = Math.min(1, load / Math.max(1, cap));
-      h += '<button class="sd' + (d === d0 ? ' on' : '') + (d === real0 ? ' td' : '') + (C.isOff(s, d) ? ' away' : '') + (A.dayBlocks(d).length ? ' has' : '') + '"' + (hol(d) ? ' title="' + hol(d).long + '"' : '') + ' role="tab" aria-selected="' + (d === d0) + '" data-act="day" data-d="' + d + '"><span class="w">' + C.WD[k].slice(1) + '</span><span class="n">' + new Date(d).getDate() + '</span>' + (hol(d) ? '<em class="hb ' + hol(d).cls + '">' + hol(d).text + '</em>' : '') + '<i class="ld ' + (load > cap ? 'over' : '') + '"><b style="height:' + Math.round(p * 100) + '%"></b></i></button>';
+      h += '<button class="sd' + (d === d0 ? ' on' : '') + (d === real0 ? ' td' : '') + (C.isOff(s, d) ? ' away' : '') + (A.dayBlocks(d).length ? ' has' : '') + '"' + (hol(d) ? ' title="' + hol(d).long + '"' : '') + ' role="tab" aria-selected="' + (d === d0) + '" data-act="day" data-d="' + d + '"><span class="w">' + C.WD[k].slice(1) + '</span><span class="n">' + C.date(d).getDate() + '</span>' + (hol(d) ? '<em class="hb ' + hol(d).cls + '">' + hol(d).text + '</em>' : '') + '<i class="ld ' + (load > cap ? 'over' : '') + '"><b style="height:' + Math.round(p * 100) + '%"></b></i></button>';
     }
     return h + '<button class="sn" data-act="day-nav" data-v="7" aria-label="下一周">›</button></div>';
   }
@@ -2910,34 +3098,34 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       const rest = pending.filter((b) => b !== nxt).slice(0, 4);
       if (rest.length) html += '<div class="upnext glass">' + rest.map((b) => '<button class="it" data-act="blk" data-id="' + b.id + '" style="--c:' + (DOMAINS[b.domain] || DOMAINS.work).color + '"><span class="tm">' + hmm(b.start) + '</span><i class="bar"></i><span class="tt">' + esc(b.title) + '</span><span class="du">' + C.fmtDur(C.bmin(b)) + '</span></button>').join('') + '</div>';
       const inbox = st.items.filter((i) => i.status === 'inbox').length;
-      html += '<div class="rituals"><button class="btn sm" data-act="morning">晨间 60 秒</button><button class="btn sm" data-act="evening">' + (new Date(t).getHours() >= 17 ? '晚间收尾' : '晚间 60 秒') + '</button>' + (inbox ? '<button class="btn sm" data-act="tab" data-v="plan">收件箱 ' + inbox + '</button>' : '') + '</div>';
+      html += '<div class="rituals"><button class="btn sm" data-act="morning">晨间 60 秒</button><button class="btn sm" data-act="evening">' + (C.date(t).getHours() >= 17 ? '晚间收尾' : '晚间 60 秒') + '</button>' + (inbox ? '<button class="btn sm" data-act="tab" data-v="plan">收件箱 ' + inbox + '</button>' : '') + '</div>';
     } else {
       const load = C.dayLoad(st, d0), cap = C.dayCap(s, d0);
       html += '<section class="card sumday"><div class="row between"><div><div class="num" style="font-size:20px">' + (bl.length ? bl.length + ' 个块' : '这天还没有安排') + '</div><div class="small muted">已排 ' + C.fmtH(load) + ' / 可承载 ' + C.fmtH(cap) + (load > cap ? ' · 超出了' : '') + '</div></div><button class="btn sm" data-act="day" data-d="' + real0 + '">回到今天</button></div></section>';
     }
 
-    const dls = st.items.filter((i) => i.type === 'deadline' && i.status === 'planned' && i.due >= d0 && i.due < d0 + 3 * DAY);
+    const dls = st.items.filter((i) => i.type === 'deadline' && i.status === 'planned' && i.due >= d0 && i.due < C.addDays(d0, 3)).sort((a, b) => a.due - b.due || String(a.id).localeCompare(String(b.id)));
     if (dls.length) html += '<div class="deadlines">' + dls.map((i) => '<span class="dlchip" style="--c:' + DOMAINS[i.domain].color + '">' + C.dayLabel(i.due, t) + '到期 · ' + esc(i.short) + ' <button class="chip" style="min-height:22px;padding:0 8px" data-act="dl-done" data-id="' + i.id + '">已处理</button></span>').join('') + '</div>';
 
     // 时间轴
-    const [a, z] = C.bounds(s, d0), ppm = 1.1, H = (z - a) * ppm;
+    const [a, z] = A.timelineRange(d0, 1, C.bounds(s, d0)), ppm = 1.1, H = (z - a) * ppm;
     let grid = '';
     for (let m = Math.ceil(a / 60) * 60; m <= z; m += 60) { const y = (m - a) * ppm; grid += '<div class="hl" style="top:' + y + 'px"></div><div class="hr" style="top:' + y + 'px">' + C.fmtM(m) + '</div>'; }
     if (s.lunchOn) grid += '<div class="lunch" style="top:' + ((s.lunch[0] - a) * ppm) + 'px;height:' + ((s.lunch[1] - s.lunch[0]) * ppm - 2) + 'px">午休 · 留白</div>';
     if (C.commuteOn(s, d0)) {
-      grid += '<div class="lunch" style="top:0;height:' + (s.commute.am * ppm - 2) + 'px">通勤</div><div class="lunch" style="top:' + ((s.commute.pmAt - a) * ppm) + 'px;height:' + (s.commute.pm * ppm - 2) + 'px">通勤</div>';
+      grid += '<div class="lunch" style="top:' + ((C.bounds(s, d0)[0] - a) * ppm) + 'px;height:' + (s.commute.am * ppm - 2) + 'px">通勤</div><div class="lunch" style="top:' + ((s.commute.pmAt - a) * ppm) + 'px;height:' + (s.commute.pm * ppm - 2) + 'px">通勤</div>';
     }
     if (C.isOff(s, d0)) grid += '<div class="lunch away" style="top:0;height:' + (H - 2) + 'px">' + esc(((s.off || []).find((o) => d0 >= o.from && d0 <= o.to) || {}).label || '休假') + ' · 不排任务</div>';
-    grid += bl.map((b) => A.blkHtml(b, d0, ppm, a, true)).join('');
-    const nm = (t - d0) / MIN;
+    grid += A.timelineHtml(d0, ppm, a, true);
+    const nm = C.minuteOfDay(t);
     if (isToday && nm >= a && nm <= z) grid += '<div class="nowline" style="top:' + ((nm - a) * ppm) + 'px"><span>' + hmm(t) + '</span></div>';
     html += '<h2>时间轴<span class="aux">块的高度与时长成正比 · 点一下看「为什么排在这里」</span></h2><div class="tl"><div class="tl-grid" data-col="' + d0 + '" data-a="' + a + '" data-z="' + z + '" data-ppm="' + ppm + '" style="height:' + H + 'px">' + grid + '</div></div>';
     if (!bl.length) html += '<div class="empty" style="padding-top:18px">时间轴空着。录入后,每一块都会告诉你为什么排在那里。</div>';
 
     const wdn = C.WD[C.dow(d0)];
-    const top = '<div class="datehead"><div class="bigday">' + new Date(d0).getDate() + '</div><div class="dm"><div class="dw">' + wdn + (isToday ? ' · 今天' : '') + '</div><div class="ym">' + MONTH(d0) + (st.settings.term && C.weekNo(st, d0) >= 1 ? ' · 第 ' + C.weekNo(st, d0) + ' 周' : '') + (ht ? ' · ' + ht.name + (ht.cls === 'off' ? '(放假)' : '(补班)') : '') + '</div></div></div>' +
-      '<div class="row">' + ring(done, bl.length) + '<button class="iconbtn" data-act="search" aria-label="搜索">' + ICON.search + '</button><button class="iconbtn" data-act="settings" aria-label="设置">' + ICON.gear + '</button></div>';
-    const sub = isToday ? (pending.length ? '还剩 ' + pending.length + ' 件事' + (heaviest ? ',最重的是「' + esc(heaviest.title) + '」' : '') : (bl.length ? '今天的安排都完成了' : '')) : '';
+    const top = '<div class="datehead"><div class="bigday">' + C.date(d0).getDate() + '</div><div class="dm"><div class="dw">' + wdn + (isToday ? ' · 今天' : '') + '</div><div class="ym">' + MONTH(d0) + (st.settings.term && C.weekNo(st, d0) >= 1 ? ' · 第 ' + C.weekNo(st, d0) + ' 周' : '') + (ht ? ' · ' + ht.name + (ht.cls === 'off' ? '(放假)' : '(补班)') : '') + '</div></div></div>' +
+      '<div class="row">' + A.timeZoneButton() + ring(done, bl.length) + '<button class="iconbtn" data-act="search" aria-label="搜索">' + ICON.search + '</button><button class="iconbtn" data-act="settings" aria-label="设置">' + ICON.gear + '</button></div>';
+    const sub = isToday ? (pending.length ? '还剩 ' + pending.length + ' 件事' + (heaviest ? ',最重的是「' + esc(heaviest.title) + '」' : '') : (bl.length ? done === bl.length ? '今天的安排都完成了' : '今日时段已结束 · 完成 ' + done + ' / ' + bl.length : '')) : '';
     return { top: top + (sub ? '' : ''), banners: A.banners(), after: () => A.initDrag && A.initDrag(), html: (sub ? '<div class="subline">' + sub + '</div>' : '') + html };
   };
 
@@ -3045,11 +3233,11 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 
   /* ---------- 提示词 ---------- */
   const WD = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-  const ymd = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + C.p2(d.getMonth() + 1) + '-' + C.p2(d.getDate()); };
+  const ymd = (ts) => { const d = C.date(ts); return d.getFullYear() + '-' + C.p2(d.getMonth() + 1) + '-' + C.p2(d.getDate()); };
   function extractSystem(t) {
     return '你是「时序」日程应用的信息提取器。用户会给你截图/照片/文字,里面可能有会议通知、群消息、海报活动、课表、航班/酒店/快递、体检预约、账单、聊天里的约定等。\n' +
       '任务:找出其中所有「用户需要安排或记住的事项」,只输出一个 JSON 对象,不要任何解释。\n' +
-      '当前时间:' + ymd(t) + ' ' + WD[C.dow(t)] + ' ' + C.fmtT(t) + '(时区 Asia/Shanghai)。所有相对日期(明天、下周三、月底)必须换算成具体日期;图中只写月日时,年份取最近的未来日期。\n' +
+      '当前时间:' + ymd(t) + ' ' + WD[C.dow(t)] + ' ' + C.fmtT(t) + '(时区 ' + C.timeZone() + ')。所有相对日期(明天、下周三、月底)必须换算成具体日期;图中只写月日时,年份取最近的未来日期。\n' +
       'JSON 格式:{"items":[{"title":"12字内短标题,保留关键人物/地点","type":"event|task|deadline","date":"YYYY-MM-DD","start":"HH:MM","end":"HH:MM","dur_min":数字,"due":"YYYY-MM-DD","domain":"work|health|relation|study|finance|home","priority":0-3,"location":"","remind_before_min":数字,"travel_min":数字,"confidence":0到1,"evidence":"原文里支撑这一项的一句话"}],"note":"一句话说明没识别出来的内容或不确定之处"}\n' +
       '规则:\n' +
       '1. event=有明确开始时间的约定(会议、航班、预约、课程);必须有 date 和 start。没写结束时间就根据常识给 dur_min。\n' +
@@ -3063,7 +3251,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   }
 
   /* ---------- 结果 → 草稿 ---------- */
-  const pd = (s) => { const m = String(s || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]).getTime() : null; };
+  const pd = (s) => { const m = String(s || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); return m ? C.parseDateTime(m[0]) : null; };
   const pt = (s) => { const m = String(s || '').match(/^(\d{1,2}):(\d{2})/); return m ? +m[1] * 60 + +m[2] : null; };
   const clip = (s) => (s.length > 12 ? s.slice(0, 12) : s);
 
@@ -3082,20 +3270,20 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       if (conf < 0.45) d.unclear = true;
       const rem = +o.remind_before_min; if (rem > 0 && rem <= 2880) d.lead = rem;
       if (type === 'event') {
-        let start = date + sm * MIN, dur = em != null && em > sm ? em - sm : Math.max(15, Math.min(720, +o.dur_min || 60));
+        let start = C.atMinute(date, sm), dur = em != null && em > sm ? em - sm : Math.max(15, Math.min(720, +o.dur_min || 60));
         if (start + dur * MIN < t) { skipped.stale++; return; }
         Object.assign(d, { type: 'event', flex: 'fixed', hasClock: true, start, end: start + dur * MIN, estMin: dur, statedMin: dur, conf: 0.9, src: 'stated' });
         const tr = +o.travel_min; if (tr > 0 && tr <= 240) d.travel = tr;
         if (!d.lead) d.lead = 15;
       } else if (type === 'deadline') {
         const dd = due != null ? due : date; if (dd == null) { skipped.bad++; return; }
-        if (dd + DAY < t) { skipped.stale++; return; }
-        Object.assign(d, { type: 'deadline', due: dd + DAY - 1, estMin: 0, conf: 0.9, src: 'stated', lead: d.lead || (domain === 'finance' ? 2 * 1440 : 1440) });
+        if (C.addDays(dd, 1) <= t) { skipped.stale++; return; }
+        Object.assign(d, { type: 'deadline', due: C.dayEnd(dd), estMin: 0, conf: 0.9, src: 'stated', lead: d.lead || (domain === 'finance' ? 2 * 1440 : 1440) });
       } else {
         const dm = +o.dur_min > 0 ? Math.min(720, Math.round(+o.dur_min)) : 0, est = C.estimate(st, domain, energy, dm, false, title);
         Object.assign(d, { type: 'task', estMin: est.min, statedMin: dm, conf: est.conf, src: est.src, learnedFrom: est.stated || 0, splittable: energy === 'deep' || est.min >= 120, minChunk: 60 });
         const dd = due != null ? due : date;
-        if (dd != null) { if (dd + DAY < t) { skipped.stale++; return; } d.due = dd + DAY - 1; d.notBefore = Math.max(t0, 0); delete d.notBefore; }
+        if (dd != null) { if (C.addDays(dd, 1) <= t) { skipped.stale++; return; } d.due = C.dayEnd(dd); d.notBefore = Math.max(t0, 0); delete d.notBefore; }
       }
       out.push(d);
     });
@@ -3302,6 +3490,12 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   const COLL = ['items', 'habits', 'blocks', 'longterm'];
   const KEY = 'chrono.sync';
   const TOMB_KEEP = 30 * DAY;
+  const clone = (o) => JSON.parse(JSON.stringify(o));
+  const sharedSettings = (s) => { const out = clone(s || {}); delete out.timeZone; return out; };
+  const nextVersion = (previous, t) => Math.max(t, ((previous && previous.u) || 0) + 1);
+  // 同毫秒修改也必须在每台设备选出同一结果;删除优先。
+  const winner = (l, r) => !l ? r : !r ? l : r.u !== l.u ? (r.u > l.u ? r : l) :
+    !!r.del !== !!l.del ? (r.del ? r : l) : (JSON.stringify(r.d) > JSON.stringify(l.d) ? r : l);
 
   /* ---------- 纯函数:收集 / 合并 / 应用(便于测试) ---------- */
   function hash(o) {                       // cyrb53
@@ -3319,12 +3513,12 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       const v = (ver[k] = ver[k] || {}), seen = new Set();
       (st[k] || []).forEach((r) => {
         seen.add(r.id); const h = hash(r);
-        if (!v[r.id] || v[r.id].del || v[r.id].h !== h) v[r.id] = { h, u: t };
-        ents[k][r.id] = { u: v[r.id].u, d: r };
+        if (!v[r.id] || v[r.id].del || v[r.id].h !== h) v[r.id] = { h, u: nextVersion(v[r.id], t) };
+        ents[k][r.id] = { u: v[r.id].u, d: clone(r) };
       });
       Object.keys(v).forEach((id) => {
         if (seen.has(id)) return;
-        if (!v[id].del) v[id] = { del: true, u: t };
+        if (!v[id].del) v[id] = { del: true, u: nextVersion(v[id], t) };
         if (t - v[id].u > TOMB_KEEP) { delete v[id]; return; }
         ents[k][id] = { u: v[id].u, del: true };
       });
@@ -3332,8 +3526,9 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     const sv = (ver.single = ver.single || {});
     const pristine = !Object.keys(sv).length && !(st.items || []).length && !(st.habits || []).length && !(st.blocks || []).length;   // 全新设备首次加入:不用默认设置覆盖云端
     ['settings', 'stats'].forEach((k) => {
-      const h = hash(st[k]); if (!sv[k] || sv[k].h !== h) sv[k] = { h, u: pristine ? 0 : t };
-      single[k] = { u: sv[k].u, d: st[k] };
+      const d = k === 'settings' ? sharedSettings(st[k]) : clone(st[k]);
+      const h = hash(d); if (!sv[k] || sv[k].h !== h) sv[k] = { h, u: pristine ? 0 : nextVersion(sv[k], t) };
+      single[k] = { u: sv[k].u, d };
     });
     return { ents, single };
   }
@@ -3345,17 +3540,26 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       const L = local.ents[k] || {}, R = (remote && remote.ents && remote.ents[k]) || {};
       new Set(Object.keys(L).concat(Object.keys(R))).forEach((id) => {
         const l = L[id], r = R[id]; let pick;
-        if (!l) pick = r; else if (!r) pick = l; else pick = r.u > l.u ? r : l;
+        pick = winner(l, r);
         out.ents[k][id] = pick;
-        if (pick === r && pick !== l) { if (!l || l.u !== r.u) out.fromRemote++; }
-        if (pick === l && (!r || r.u < l.u)) out.needPush = true;
+        if (pick === r && hash(l || null) !== hash(r)) out.fromRemote++;
+        if (pick === l && hash(r || null) !== hash(l)) out.needPush = true;
+        // 已确认的重复标记不被离线旧副本抹掉,同时保留记录内容以便恢复。
+        const archived = k === 'blocks' && [l, r].find((p) => p && p.d && p.d.duplicateOf);
+        if (archived && pick && pick.d && (!pick.d.duplicateOf || !pick.d.skipped)) {
+          out.ents[k][id] = { u: Math.max(l ? l.u : 0, r ? r.u : 0) + 1, d: { ...clone(pick.d), skipped: true, duplicateOf: archived.d.duplicateOf } };
+          out.fromRemote++; out.needPush = true;
+        }
       });
     });
     ['settings', 'stats'].forEach((k) => {
-      const l = local.single[k], r = remote && remote.single && remote.single[k];
+      let l = local.single[k], r = remote && remote.single && remote.single[k];
+      if (k === 'settings') { l = { ...l, d: sharedSettings(l.d) }; if (r) r = { ...r, d: sharedSettings(r.d) }; }
       if (!r) { out.single[k] = l; out.needPush = true; return; }
       if (k === 'stats') { out.single[k] = { u: Math.max(l.u, r.u), d: mergeStats(l.d, r.d) }; if (hash(out.single[k].d) !== hash(r.d)) out.needPush = true; if (hash(out.single[k].d) !== hash(l.d)) out.fromRemote++; return; }
-      out.single[k] = r.u > l.u ? r : l; if (r.u > l.u) out.fromRemote++; if (l.u > r.u) out.needPush = true;
+      out.single[k] = winner(l, r);
+      if (out.single[k] === r && hash(l) !== hash(r)) out.fromRemote++;
+      if (out.single[k] === l && hash(l) !== hash(r)) out.needPush = true;
     });
     return out;
   }
@@ -3369,36 +3573,41 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 
   /* 把合并结果写回状态,同时刷新 ver;随后去重 */
   function apply(st, merged, ver) {
+    const displayZone = st.settings.timeZone || 'system';
+    const zones = new Map((st.habits || []).filter((h) => h.timeZone && h.timeZone !== 'system').map((h) => [h.id, h.timeZone]));
     COLL.forEach((k) => {
       const v = (ver[k] = ver[k] || {}), arr = [];
       Object.keys(merged.ents[k]).forEach((id) => {
         const p = merged.ents[k][id];
         if (p.del) { v[id] = { del: true, u: p.u }; return; }
-        arr.push(p.d); v[id] = { h: hash(p.d), u: p.u };
+        const d = clone(p.d); arr.push(d); v[id] = { h: hash(p.d), u: p.u };
+        if (k === 'habits' && (!d.timeZone || d.timeZone === 'system') && zones.has(id)) d.timeZone = zones.get(id);
       });
       st[k] = arr;
     });
     const sv = (ver.single = ver.single || {});
-    ['settings', 'stats'].forEach((k) => { st[k] = merged.single[k].d; sv[k] = { h: hash(st[k]), u: merged.single[k].u }; });
+    ['settings', 'stats'].forEach((k) => { st[k] = clone(merged.single[k].d); sv[k] = { h: hash(k === 'settings' ? sharedSettings(st[k]) : st[k]), u: merged.single[k].u }; });
+    st.settings.timeZone = displayZone;
     return dedupe(st, ver);
   }
 
   /* 两台设备各自给同一件事排了一遍 → 只留最新的一份 */
   function dedupe(st, ver) {
-    let n = 0; const skip = (b) => { b.skipped = true; ver.blocks[b.id] = { h: hash(b), u: Date.now() }; n++; };
+    ver.blocks = ver.blocks || {};
+    let n = C.repairRecurring(st, ver.blocks).changed;
+    const skip = (b) => { b.skipped = true; n++; };
     const live = st.blocks.filter((b) => !b.skipped && !b.done && !b.started && b.kind !== 'commit' && !b.locked);
-    const byItem = {}, byKey = {};
-    live.forEach((b) => { if (b.hkey) (byKey[b.hkey] = byKey[b.hkey] || []).push(b); else if (b.itemId) (byItem[b.itemId] = byItem[b.itemId] || []).push(b); });
-    Object.keys(byKey).forEach((k) => { const g = byKey[k].sort((a, b) => ((ver.blocks[b.id] || {}).u || 0) - ((ver.blocks[a.id] || {}).u || 0)); g.slice(1).forEach(skip); });
+    const byItem = {};
+    live.forEach((b) => { if (!b.hkey && b.itemId) (byItem[b.itemId] = byItem[b.itemId] || []).push(b); });
     Object.keys(byItem).forEach((id) => {
       const it = C.itemOf(st, id); if (!it) return; const need = C.effMin(it);
       const done = st.blocks.filter((b) => b.itemId === id && b.done).reduce((a, b) => a + C.bmin(b), 0);
-      let got = done; const g = byItem[id].sort((a, b) => ((ver.blocks[b.id] || {}).u || 0) - ((ver.blocks[a.id] || {}).u || 0));
+      let got = done; const g = byItem[id].sort((a, b) => ((ver.blocks[b.id] || {}).u || 0) - ((ver.blocks[a.id] || {}).u || 0) || String(a.id).localeCompare(String(b.id)));
       g.forEach((b) => { if (got >= need - 1) skip(b); else got += C.bmin(b); });
     });
     // 已丢弃的块超过 3 天就清掉,避免无限增长
     const cut = Date.now() - 3 * DAY, before = st.blocks.length;
-    st.blocks = st.blocks.filter((b) => !(b.skipped && b.end < cut));
+    st.blocks = st.blocks.filter((b) => !(b.skipped && !b.hkey && b.end < cut));
     if (st.log && st.log.length > 400) st.log = st.log.slice(-400);
     return n + (before - st.blocks.length);
   }
@@ -3465,13 +3674,16 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
     if (busy && manual && Date.now() - busyAt > 20000) busy = false;            // 上一次卡死了:强制解除
     if (busy) { if (manual) A.toast('正在同步中,请稍等…'); return { skipped: true }; } busy = true; busyAt = Date.now();
     try {
-      const { room } = await derive(c.code), t = Date.now(); let pulled = 0, pushed = false;
+      const { room } = await derive(c.code), t = Date.now(); let pulled = 0, pushed = false, finished = false, repaired = 0;
       for (let attempt = 0; attempt < 4; attempt++) {
         const g = await http(c, 'GET', room);
         if (g.status !== 200 && g.status !== 404) throw new Error(hint(g.status));
         const remote = g.status === 200 && g.j.blob ? await open(c.code, g.j.blob) : null, rev = g.status === 200 ? g.j.rev : 0;
         const local = collect(A.st, c.ver, t), merged = merge(local, remote);
-        const changed = apply(A.st, merged, c.ver); pulled = merged.fromRemote;
+        const changed = apply(A.st, merged, c.ver); pulled += merged.fromRemote; repaired += changed;
+        // 上传实际修复后的状态,并为修复和删除推进版本号,不复用合并前的快照。
+        const repairedState = collect(A.st, c.ver, Date.now());
+        const repairPush = hash(repairedState.ents) !== hash(merged.ents) || hash(repairedState.single) !== hash(merged.single);
         /* 大模型配置(含密钥)一起同步:同样端到端加密,后改者生效;空配置不会覆盖已有的 */
         let llmPush = false;
         if (A.LLM) {
@@ -3481,18 +3693,20 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
           if (rl && rl.d && (rl.u || 0) > (c.llmU || 0) && hash(rl.d) !== lh) { A.LLM.setCfg(Object.assign({}, rl.d, { consent: lc.consent || rl.d.consent })); c.llmH = hash(A.LLM.getCfg()); c.llmU = rl.u; pulled++; }
           else if (!rl || (c.llmU || 0) > (rl.u || 0)) llmPush = !!(c.llmU);
         }
-        if (merged.fromRemote || changed) { C.save.__raw ? C.save.__raw(A.st) : C.save(A.st); }
-        if (merged.needPush || changed || !remote || llmPush) {
-          const payload = { v: 1, t, dev: c.dev || '', ents: merged.ents, single: merged.single, log: (A.st.log || []).slice(-300), meta: {}, llm: A.LLM && c.llmU ? { u: c.llmU, d: A.LLM.getCfg() } : (remote && remote.llm) || undefined };
+        if (merged.fromRemote || changed || repairPush) { C.save.__raw ? C.save.__raw(A.st) : C.save(A.st); }
+        if (merged.needPush || changed || repairPush || !remote || llmPush) {
+          const payload = { v: 1, t, dev: c.dev || '', ents: repairedState.ents, single: repairedState.single, log: (A.st.log || []).slice(-300), meta: {}, llm: A.LLM && c.llmU ? { u: c.llmU, d: A.LLM.getCfg() } : (remote && remote.llm) || undefined };
           const p = await http(c, 'PUT', room, { rev, blob: await seal(c.code, payload) });
           if (p.status === 409) continue;
           if (p.status !== 200) throw new Error(p.status === 413 ? '数据太大,服务器拒绝了。可先导出备份并清理旧数据。' : hint(p.status));
           c.rev = p.j.rev; pushed = true;
         } else c.rev = rev;
-        break;
+        finished = true; break;
       }
+      if (!finished) throw new Error('其他设备正在同时同步,本机改动已保留。请稍后再点立即同步。');
       c.last = Date.now(); c.status = { ok: true, t: c.last, pulled, pushed }; setCfg(c);
-      if (pulled) { A.render(); if (manual) A.toast('已同步:收到 ' + pulled + ' 处更新' + (pushed ? ',并上传了本机改动' : '') + '。'); }
+      if (pulled || repaired) A.render();
+      if (pulled) { if (manual) A.toast('已同步:收到 ' + pulled + ' 处更新' + (pushed ? ',并上传了本机改动' : '') + '。'); }
       else if (manual) A.toast(pushed ? '已同步:本机改动已上传。' : '已是最新。');
       return { pulled, pushed };
     } catch (e) {
@@ -3592,16 +3806,16 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 
   /* ---------- 数据与规则(纯函数,便于测试) ---------- */
   const list = (st) => (st.longterm = st.longterm || []);
-  function nextDue(h) { return h.lastDone ? day0(h.lastDone) + (h.every || 1) * DAY : day0(h.createdAt || 0); }
+  function nextDue(h) { return h.lastDone ? C.addDays(day0(h.lastDone), h.every || 1) : day0(h.createdAt || 0); }
   function isDue(h, t) { return !h.paused && day0(t) >= nextDue(h) && !(h.snoozeUntil && h.snoozeUntil > t); }
   const dueList = (st, t) => list(st).filter((h) => isDue(h, t));
-  const doneInDays = (h, t, n) => (h.log || []).filter((x) => x > day0(t) - (n - 1) * DAY).length;
+  const doneInDays = (h, t, n) => (h.log || []).filter((x) => x > C.addDays(day0(t), -(n - 1))).length;
   function add(st, d, t) {
     const h = { id: C.uid(st, 'l'), title: String(d.title).trim().slice(0, 40), note: String(d.note || '').slice(0, 120), domain: DOMAINS[d.domain] ? d.domain : C.domainOf(d.title), every: Math.max(1, Math.min(365, Math.round(+d.every || 1))), createdAt: t, lastDone: 0, snoozeUntil: 0, log: [], paused: false };
     list(st).push(h); return h;
   }
   function done(st, id, t) { const h = list(st).find((x) => x.id === id); if (!h) return null; h.lastDone = t; h.snoozeUntil = 0; h.log = (h.log || []).concat([t]).slice(-120); return h; }
-  function snooze(st, id, t) { const h = list(st).find((x) => x.id === id); if (!h) return null; h.snoozeUntil = day0(t) + DAY; return h; }
+  function snooze(st, id, t) { const h = list(st).find((x) => x.id === id); if (!h) return null; h.snoozeUntil = C.addDays(day0(t), 1); return h; }
   const remove = (st, id) => { st.longterm = list(st).filter((x) => x.id !== id); };
 
   /* 自然语言:「长期坚持背英语,每天提醒我」「一直要联系老朋友,每两周」 */
@@ -3675,7 +3889,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   /* ---------- 持续提醒:每天固定时间合并成一条;晚间可选再提醒一次 ---------- */
   function ltRemind() {
     if (!A.st || !A.notify) return; const s = S(), cfg = s.ltRemind || { on: true, time: 540, evening: false }; if (!cfg.on || (A.focus)) return;
-    const t = now(), d = day0(t), mins = (t - d) / 60000, due = dueList(A.st, t); if (!due.length) return;
+    const t = now(), d = day0(t), mins = C.minuteOfDay(t), due = dueList(A.st, t); if (!due.length) return;
     const body = due.slice(0, 3).map((h) => h.title).join('、') + (due.length > 3 ? ' 等 ' + due.length + ' 件' : '');
     if (mins >= cfg.time) A.notify('lt:' + d, '长期事项:' + due.length + ' 件在等你', body + '。不急,想做时做。', null, false);
     if (cfg.evening && mins >= 20 * 60) A.notify('lt2:' + d, '今天还有长期事项没动', body, null, false);
@@ -3693,7 +3907,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
 (function (G) {
   'use strict';
   const C = G.Chrono, A = G.A, { $, esc, now } = A;
-  const VERSION = '1.5.3', REPO = '';                         // REPO:填上你的 GitHub 地址,设置页会显示「源代码」链接(AGPL 建议)
+  const VERSION = '1.5.5', REPO = '';                         // REPO:填上你的 GitHub 地址,设置页会显示「源代码」链接(AGPL 建议)
   const LS = (k, v) => { try { if (v === undefined) return G.localStorage.getItem(k); if (v === null) G.localStorage.removeItem(k); else G.localStorage.setItem(k, v); } catch (e) { /* */ } return null; };
   const cmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d < 0 ? -1 : 1; } return 0; };
   const base = () => { const o = (G.location && /^https?:$/.test(location.protocol) && !/^(localhost|127\.|\[::1\])/.test(location.hostname)) ? location.origin : (LS('chrono.cloud') || ''); return String(o).replace(/\/+$/, ''); };
@@ -3758,16 +3972,17 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   const C = G.Chrono, A = G.A, L = A.LLM, { MIN, DAY, DOMAINS } = C;
   const { $, esc, now } = A;
   const WD = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-  const ymd = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + C.p2(d.getMonth() + 1) + '-' + C.p2(d.getDate()); };
-  const pd = (s) => { const m = String(s || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]).getTime() : null; };
+  const ymd = (ts) => { const d = C.date(ts); return d.getFullYear() + '-' + C.p2(d.getMonth() + 1) + '-' + C.p2(d.getDate()); };
+  const pd = (s) => { const m = String(s || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); return m ? C.parseDateTime(m[0]) : null; };
   const pt = (s) => { const m = String(s || '').match(/^(\d{1,2}):(\d{2})/); return m ? +m[1] * 60 + +m[2] : null; };
-  const fmtD = (ts) => (new Date(ts).getMonth() + 1) + '月' + new Date(ts).getDate() + '日 ' + WD[C.dow(ts)];
+  const fmtD = (ts) => (C.date(ts).getMonth() + 1) + '月' + C.date(ts).getDate() + '日 ' + WD[C.dow(ts)];
   const fmtM = (m) => C.fmtM(m);
   const dom = (k, t) => (DOMAINS[k] ? k : C.domainOf(t || ''));
 
   /* ---------- 上下文:让模型看到真实数据(带 ID) ---------- */
   function ctxText() {
     const st = A.st, t = now(), t0 = C.dayStart(t), S = st.settings, L2 = [];
+    L2.push('当前显示和新录入时区: ' + C.timeZone() + '。已有固定周程按各自标注的原时区理解。');
     const T = S.term, wn = C.weekNo(st, t0);
     L2.push('今天:' + ymd(t) + ' ' + WD[C.dow(t)] + ' ' + C.fmtT(t) + ';' + (T ? '学期第 1 周的周一=' + ymd(T.start) + ',共 ' + (T.weeks || '?') + ' 周,今天是第 ' + wn + ' 周' : '尚未设置学期(课表的周次/单双周需要先知道第 1 周是哪天)'));
     const hs = C.Holiday ? C.Holiday.upcoming(t0, 120) : [];
@@ -3924,16 +4139,16 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
         if (op.priority != null && op.priority >= 0 && op.priority <= 3) { patch.priority = Math.round(+op.priority); ch.push('优先级 P' + patch.priority); }
         if (DOMAINS[op.domain]) { patch.domain = op.domain; ch.push('领域 ' + DOMAINS[op.domain].name); }
         if (op.location != null) { patch.loc = String(op.location); ch.push('地点 ' + patch.loc); }
-        if (it.type === 'event' && (op.date || op.start)) { const d = pd(op.date) != null ? pd(op.date) : C.dayStart(it.start), s = pt(op.start) != null ? pt(op.start) : (it.start - C.dayStart(it.start)) / MIN; patch.start = d + s * MIN; const dur = patch.estMin || it.estMin; patch.end = patch.start + dur * MIN; if (pt(op.end) != null && pt(op.end) > s && !patch.estMin) { patch.estMin = pt(op.end) - s; patch.end = d + pt(op.end) * MIN; } ch.push('时间改为 ' + fmtD(patch.start) + ' ' + C.fmtT(patch.start)); }
-        if (it.type !== 'event' && (op.due || (op.date && it.type === 'deadline'))) { const d = pd(op.due || op.date); if (d != null) { patch.due = d + DAY - 1; ch.push((it.type === 'deadline' ? '到期日' : '截止') + '改为 ' + fmtD(d)); } }
+        if (it.type === 'event' && (op.date || op.start)) { const d = pd(op.date) != null ? pd(op.date) : C.dayStart(it.start), s = pt(op.start) != null ? pt(op.start) : C.minuteOfDay(it.start); patch.start = C.atMinute(d, s); const dur = patch.estMin || it.estMin; patch.end = patch.start + dur * MIN; if (pt(op.end) != null && pt(op.end) > s && !patch.estMin) { patch.estMin = pt(op.end) - s; patch.end = C.atMinute(d, pt(op.end)); } ch.push('时间改为 ' + fmtD(patch.start) + ' ' + C.fmtT(patch.start)); }
+        if (it.type !== 'event' && (op.due || (op.date && it.type === 'deadline'))) { const d = pd(op.due || op.date); if (d != null) { patch.due = C.dayEnd(d); ch.push((it.type === 'deadline' ? '到期日' : '截止') + '改为 ' + fmtD(d)); } }
         if (!ch.length) return bad('没有要修改的内容');
         return { ok: true, text: '修改「' + it.short + '」:' + ch.join(',') , run: () => { C.editItem(st, it.id, patch, t); } };
       }
       case 'move_item': {
         const it = item(op.id), d = pd(op.date); if (!it || d == null) return bad('找不到这件事或日期');
-        if (it.type === 'event') { const s = pt(op.start) != null ? pt(op.start) : (it.start - C.dayStart(it.start)) / MIN, ns = d + s * MIN; return { ok: true, text: '把「' + it.short + '」挪到 ' + fmtD(ns) + ' ' + C.fmtT(ns), run: () => { C.editItem(st, it.id, { start: ns, end: ns + it.estMin * MIN }, t); } }; }
-        if (it.type === 'deadline') return { ok: true, text: '「' + it.short + '」到期日改为 ' + fmtD(d), run: () => { C.editItem(st, it.id, { due: d + DAY - 1 }, t); } };
-        return { ok: true, text: '把「' + it.short + '」挪到 ' + fmtD(d) + (pt(op.start) != null ? ' ' + op.start : '') + ' 之后再做', run: () => { it.notBefore = d; if (pt(op.start) != null) it.hold = d + pt(op.start) * MIN; if (it.due && it.due < d) it.due = d + DAY - 1; st.blocks.forEach((b) => { if (b.itemId === it.id && !b.done && !b.started) b.skipped = true; }); C.plan(st, t, 'inc'); } };
+        if (it.type === 'event') { const s = pt(op.start) != null ? pt(op.start) : C.minuteOfDay(it.start), ns = C.atMinute(d, s); return { ok: true, text: '把「' + it.short + '」挪到 ' + fmtD(ns) + ' ' + C.fmtT(ns), run: () => { C.editItem(st, it.id, { start: ns, end: ns + it.estMin * MIN }, t); } }; }
+        if (it.type === 'deadline') return { ok: true, text: '「' + it.short + '」到期日改为 ' + fmtD(d), run: () => { C.editItem(st, it.id, { due: C.dayEnd(d) }, t); } };
+        return { ok: true, text: '把「' + it.short + '」挪到 ' + fmtD(d) + (pt(op.start) != null ? ' ' + op.start : '') + ' 之后再做', run: () => { it.notBefore = d; if (pt(op.start) != null) it.hold = C.atMinute(d, pt(op.start)); if (it.due && it.due < d) it.due = C.dayEnd(d); st.blocks.forEach((b) => { if (b.itemId === it.id && !b.done && !b.started) b.skipped = true; }); C.plan(st, t, 'inc'); } };
       }
       case 'delete_item': { const it = item(op.id); if (!it) return bad('找不到这件事'); return { ok: true, danger: true, text: '删除「' + it.short + '」', run: () => { C.removeItem(st, it.id); } }; }
       case 'complete_item': { const it = item(op.id); if (!it) return bad('找不到这件事'); return { ok: true, text: '标记「' + it.short + '」已完成', run: () => { it.status = 'done'; st.blocks.forEach((b) => { if (b.itemId === it.id && !b.done) { b.skipped = true; } }); } }; }
@@ -4139,12 +4354,12 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       case 'rc-set': A.setCard(+el.dataset.i, el.dataset.f, el.dataset.v); A.drawReceipt(); break;
       case 'rc-when': {
         const i = +el.dataset.i, c = A.rc.cards[i], d = c.d, dv = $('#rcDate' + i).value, tv = $('#rcTime' + i).value;
-        if (dv && tv) { const [h, m] = tv.split(':').map(Number); d.start = A.parseDateVal(dv) + (h * 60 + m) * MIN; d.end = d.start + d.estMin * MIN; c.edits++; }
+        if (dv && tv) { const [h, m] = tv.split(':').map(Number); d.start = C.atMinute(A.parseDateVal(dv), h * 60 + m); d.end = d.start + d.estMin * MIN; c.edits++; }
         c.field = null; A.drawReceipt(); break;
       }
       case 'rc-due': {
         const i = +el.dataset.i, c = A.rc.cards[i], dv = $('#rcDate' + i).value;
-        if (dv) { c.d.due = A.parseDateVal(dv) + DAY - 1; delete c.d.notBefore; c.d.askDue = false; c.edits++; }
+        if (dv) { c.d.due = C.dayEnd(A.parseDateVal(dv)); delete c.d.notBefore; c.d.askDue = false; c.edits++; }
         c.field = null; A.drawReceipt(); break;
       }
       case 'opt': {
@@ -4202,7 +4417,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       case 'inbox-del': A.mutate(() => C.removeItem(st, id), '已删除'); break;
       case 'manual': A.manualSheet(id); break;
       case 'manual-ok': {
-        const v = $('#manDt').value; if (!v) break; const ts = new Date(v).getTime(), it = C.itemOf(st, id);
+        const v = $('#manDt').value; if (!v) break; const ts = C.parseDateTime(v), it = C.itemOf(st, id); if (ts == null) { A.toast('请选择有效的日期和时间。'); break; }
         A.closeSheet();
         A.mutate(() => { const need = Math.max(15, C.effMin(it) - C.placedMin(st, id)); st.blocks.push({ id: C.uid(st, 'b'), itemId: id, title: it.short, domain: it.domain, kind: it.energy === 'deep' ? 'focus' : 'admin', start: ts, end: ts + need * MIN, locked: true, ctx: it.ctx, prio: it.priority, why: '你手动安排在这里,系统不会再动它' }); }, '已放好');
         break;
@@ -4257,7 +4472,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   A.checkReminders = () => {
     const st = A.st, s = st.settings, t = now(); if (!s.notify || A.focus) return;
     const d0 = C.dayStart(t);
-    st.blocks.forEach((b) => {
+    st.blocks.slice().sort(C.compareBlocks).forEach((b) => {
       if (b.skipped || b.done || b.missed || b.kind === 'free' || b.started) return;
       const it = b.itemId ? C.itemOf(st, b.itemId) : null, lead = it && it.lead && it.lead < 1440 ? it.lead : 15;
       const toStart = (b.start - t) / MIN;
@@ -4268,7 +4483,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
       if (i.type !== 'deadline' || i.status !== 'planned') return;
       const at = i.due - (i.lead || 1440) * MIN; if (t >= at && t < i.due) A.notify('d:' + i.id, '快到期:' + i.short, C.dayLabel(i.due, t) + '到期', null, false);
     });
-    if (new Date(t).getHours() >= 21) {
+    if (C.date(t).getHours() >= 21) {
       const tm = C.addDays(d0, 1), bl = A.dayBlocks(tm).filter((b) => b.itemId || b.kind === 'commit');
       if (bl.length) { const hv = bl.slice().sort((a, b) => (a.prio - b.prio) || (C.bmin(b) - C.bmin(a)))[0]; A.notify('pre:' + tm, '明天有 ' + bl.length + ' 件事', '最重的是 ' + A.hmm(hv.start) + ' 的「' + hv.title + '」', null, false); }
     }
@@ -4296,7 +4511,7 @@ input[type=time], input[type=date], input[type=datetime-local] { min-height: 44p
   });
 
   function boot() {
-    A.st = C.load();
+    A.st = C.load(); C.initTimeZones(A.st);
     if (C.repairMoved(A.st)) C.save(A.st);
     if (A.st.items.length || A.st.habits.length) { C.plan(A.st, Date.now(), 'inc'); C.save(A.st); }     // 启动时整理一次:让位给硬约束、清掉已有的重叠
     const t = now(), d0 = C.dayStart(t);

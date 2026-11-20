@@ -29,7 +29,7 @@
     if ((m = s.match(/明[天日早晚]/))) return day(addDays(t0, 1), m[0]);
     if ((m = s.match(/今[天日早晚]/))) return day(t0, m[0]);
     if ((m = s.match(/周末/))) {
-      const w = dow(t0), sat = w >= 5 ? t0 - (w - 5) * DAY : addDays(weekStart(t0), 5);
+      const w = dow(t0), sat = w >= 5 ? addDays(t0, -(w - 5)) : addDays(weekStart(t0), 5);
       return day(Math.max(sat, t0), m[0], { range: [Math.max(sat, t0), addDays(weekStart(t0), 6)] });
     }
     if ((m = s.match(/(下|这|本)?(?:个)?(?:周|星期|礼拜)([一二三四五六日天])/))) {
@@ -39,16 +39,16 @@
       return day(ts, m[0]);
     }
     if ((m = s.match(new RegExp('(' + NUM + ')月(' + NUM + ')[日号]?')))) {
-      const mo = cn(m[1]) - 1, d = cn(m[2]), y = new Date(now).getFullYear();
-      let dt = new Date(y, mo, d); if (dayStart(dt.getTime()) < t0) dt = new Date(y + 1, mo, d);
+      const mo = cn(m[1]) - 1, d = cn(m[2]), y = C.date(now).getFullYear();
+      let dt = C.makeDate(y, mo, d); if (dayStart(dt.getTime()) < t0) dt = C.makeDate(y + 1, mo, d);
       return day(dt.getTime(), m[0]);
     }
     if ((m = s.match(/月底|月末/))) {
-      const n = new Date(now); return day(new Date(n.getFullYear(), n.getMonth() + 1, 0).getTime(), m[0], { soft: true });
+      const n = C.date(now); return day(C.makeDate(n.getFullYear(), n.getMonth() + 1, 0).getTime(), m[0], { soft: true });
     }
     if ((m = s.match(new RegExp('(' + NUM + ')[号日]')))) {
-      const n = new Date(now), d = cn(m[1]); let dt = new Date(n.getFullYear(), n.getMonth(), d);
-      if (dayStart(dt.getTime()) < t0) dt = new Date(n.getFullYear(), n.getMonth() + 1, d);
+      const n = C.date(now), d = cn(m[1]); let dt = C.makeDate(n.getFullYear(), n.getMonth(), d);
+      if (dayStart(dt.getTime()) < t0) dt = C.makeDate(n.getFullYear(), n.getMonth() + 1, d);
       return day(dt.getTime(), m[0]);
     }
     if ((m = s.match(/下(?:个)?周/))) {
@@ -228,7 +228,7 @@
     let m = seg.match(/^(.*?)(?:从)?([^到至]+?)(?:到|至)([^出请休旅放培]+?)(?:去|的)?(出差|请假|休假|旅游|旅行|出游|放假|培训)/);
     if (m) {
       const a = parseDate(m[2], now), b = parseDate(m[3], now);
-      if (a && b) { let to = b.ts; if (to < a.ts) to += 7 * DAY; return { from: a.ts, to, label: m[4] }; }
+      if (a && b) { let to = b.ts; if (to < a.ts) to = addDays(to, 7); return { from: a.ts, to, label: m[4] }; }
     }
     m = seg.match(/^(.*?)(今天|明天|后天|周[一二三四五六日天]|下周[一二三四五六日天]|\d+月\d+[日号])(?:一天|全天)?(请假|休假|出差|放假)/);
     if (m) { const a = parseDate(m[2], now); if (a) return { from: a.ts, to: a.ts, label: m[3] }; }
@@ -281,7 +281,7 @@
         if (lead) prev.lead = lead.min;
         if (prev.type === 'event') { if (wantPrep) prev.prep = Math.min(120, lead.min); if (travel) prev.travel = travel; }
         if (date && !prev.date) { prev.date = date; }
-        if (clk && prev.type === 'event' && !prev.hasClock) { prev.hasClock = true; prev.start = dayStart(prev.start) + clk.min * MIN; prev.end = prev.start + prev.estMin * MIN; }
+        if (clk && prev.type === 'event' && !prev.hasClock) { prev.hasClock = true; prev.start = C.atMinute(prev.start, clk.min); prev.end = prev.start + prev.estMin * MIN; }
         return;
       }
       if (title.length < 1) return;
@@ -299,7 +299,7 @@
       const isDeadline = PAYDL.test(title) && !before && !dur && !clk;
       if (isDeadline) {
         d.type = 'deadline'; d.estMin = 0; d.conf = 0.9; d.src = 'stated';
-        d.due = date ? date.ts + DAY - 1 : dayStart(now) + 7 * DAY - 1;
+        d.due = date ? C.dayEnd(date.ts) : addDays(dayStart(now), 7) - 1;
         if (!d.lead) d.lead = domain === 'finance' ? 2 * 1440 : 1440;
         d.status = 'planned';
       } else if (clk && !before) {
@@ -307,7 +307,7 @@
         const est = estimate(st, domain, energy, dur ? dur.min : 0, true, title);
         d.statedMin = dur ? dur.min : 0; d.estMin = est.min || (/聚餐|吃饭|疫苗|体检|看病/.test(title) ? 120 : 60); d.conf = est.conf; d.src = est.src;
         const base = date ? date.ts : (clk.min <= (now - dayStart(now)) / MIN ? addDays(dayStart(now), 1) : dayStart(now));
-        d.start = base + clk.min * MIN; d.end = d.start + d.estMin * MIN;
+        d.start = C.atMinute(base, clk.min); d.end = d.start + d.estMin * MIN;
         d.date = d.date || { ts: base };
         if (wantPrep) d.prep = Math.min(120, lead.min);
         if (travel) d.travel = travel;
@@ -319,9 +319,9 @@
         if (/体检|疫苗|看病|门诊|复诊/.test(title)) d.splittable = false;
         d.minChunk = 60;
         if (date) {
-          if (before) { d.due = date.ts + DAY - 1; }
-          else if (date.range) { d.notBefore = date.range[0]; d.due = date.range[1] + DAY - 1; }
-          else { d.notBefore = date.ts; d.due = date.ts + DAY - 1; }
+          if (before) { d.due = C.dayEnd(date.ts); }
+          else if (date.range) { d.notBefore = date.range[0]; d.due = C.dayEnd(date.range[1]); }
+          else { d.notBefore = date.ts; d.due = C.dayEnd(date.ts); }
           if (date.soft && !date.range && before === false) { delete d.notBefore; }
         } else if (asap) { d.asap = true; }
         if (period && !clk) d.win = PWIN[period];

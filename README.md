@@ -1,3 +1,5 @@
+> 当前统一版本: **1.5.5**。本地使用、GitHub 更新和 Cloudflare 部署请先看 [从这里开始](从这里开始.md)。
+
 <p align="center"><img src="icons/icon-192.png" width="96" alt="时序 Chrono"></p>
 
 # 时序 Chrono

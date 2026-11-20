@@ -1,4 +1,6 @@
 // node tests/ui-smoke.js —— 不依赖浏览器:用最小 DOM 桩把整个界面逻辑跑一遍,抓运行时异常
+// 场景文案使用「周三/周四」,固定周一早晨,不受运行测试的日期影响。
+Date.now = () => new Date(2026, 10, 16, 8, 12).getTime();
 const handlers = {}, els = {};
 const mk = (sel) => els[sel] || (els[sel] = { innerHTML: '', value: '', hidden: false, textContent: '', style: {}, dataset: {}, isConnected: true,
   classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } }, addEventListener() {}, querySelectorAll: () => [], focus() {}, click() {}, remove() {} });
@@ -115,6 +117,44 @@ const snap = JSON.stringify(A.st); A.mutate(() => { A.st.items = []; }); A.undo(
     const s1 = b0.start; click('blk-shift', { id: b0.id, v: '15' }); ok(b0.start === s1 + 15 * C.MIN, '整体推后 15 分钟');
     els['#btA'] = mk2('09:00'); els['#btB'] = mk2('08:00'); const e1 = b0.end; click('blk-time-set', { id: b0.id }); ok(b0.end === e1, '结束早于开始会被拒绝');
   }
+}
+
+// 时区入口、撤销、跨夜、乱序、重叠布局、作息外安排。
+{
+  const previous = JSON.stringify(A.st);
+  A.st = C.fresh(); A.st.settings.timeZone = 'Asia/Shanghai'; A.fakeNow = C.parseDateTime('2026-11-19T07:00');
+  const ts = (s) => C.parseDateTime('2026-11-' + s);
+  const b = (id, start, end) => ({ id, title: id, start: ts(start), end: ts(end), domain: 'work', kind: 'commit' });
+  A.st.blocks = [b('晚间安排', '19T23:00', '20T00:30'), b('上午安排', '19T09:00', '19T10:00'), b('重叠安排', '19T09:30', '19T10:30'), b('昨日跨夜', '18T23:30', '19T00:30'), b('早间安排', '19T06:00', '19T06:30')];
+  A.render(); const d = C.dayStart(A.fakeNow);
+  ok(A.dayBlocks(d).map((x) => x.id).join(',') === '昨日跨夜,早间安排,上午安排,重叠安排,晚间安排', '日期内包含跨夜安排,严格按发生时间排序');
+  ok(A.timelineRange(d, 1, [480, 1320]).join(',') === '0,1440', '时间轴自动扩展,保留作息外安排');
+  const timeline = A.timelineHtml(d, 1.1, 0, true);
+  ok(timeline.includes('width:calc(50% - 6px)') && !/top:-/.test(timeline), '重叠安排并排、跨夜块不越出顶部');
+  const late = A.st.blocks.find((x) => x.id === '晚间安排').start;
+  click('timezone'); ok(els['#sheet-root'].innerHTML.includes('timeZoneChoice') && els['#sheet-root'].innerHTML.includes('按当地作息重排待办'), '时区面板可选时区和当地重排');
+  els['#timeZoneChoice'] = { value: 'America/New_York' }; els['#timeZoneReplan'] = { checked: false };
+  click('timezone-apply');
+  ok(A.st.settings.timeZone === 'America/New_York' && A.st.blocks.find((x) => x.id === '晚间安排').start === late, '切换纽约保持已有安排的真实时刻');
+  ok(C.dateVal(A.fakeNow) === '2026-11-18' && A.viewDay === null, '切换后今天按当地日期刷新');
+  ok(C.load().settings.timeZone === 'America/New_York', '时区设置保存后可恢复');
+  A.undo(A._undo); ok(A.st.settings.timeZone === 'Asia/Shanghai', '时区切换可撤销');
+  A.st.blocks = []; A.st.items = []; A.st.habits = []; A.st.settings.holidayAvoid = false;
+  const draft = C.parse('写报告,一小时', A.st, A.fakeNow).items[0];
+  const item = C.addItems(A.st, [draft], A.fakeNow)[0];
+  const oldStart = C.parseDateTime('2026-11-19T09:00');
+  A.st.blocks.push({ id: 'flex', itemId: item.id, title: item.short, domain: item.domain, kind: 'focus', start: oldStart, end: oldStart + C.effMin(item) * C.MIN });
+  A.st.blocks.push(b('locked', '19T11:00', '19T12:00'));
+  const fixedStart = A.st.blocks[1].start;
+  els['#timeZoneChoice'].value = 'America/New_York'; els['#timeZoneReplan'].checked = true;
+  click('timezone-apply');
+  const replanned = A.st.blocks.filter((x) => x.itemId === item.id && !x.skipped);
+  ok(replanned.length > 0 && replanned.every((x) => C.minuteOfDay(x.start) >= A.st.settings.dayStart && C.minuteOfDay(x.end) <= A.st.settings.dayEnd), '勾选重排后,待办落在新时区可用时段');
+  ok(A.st.blocks.find((x) => x.id === 'locked').start === fixedStart, '当地重排保留固定会议');
+  A.undo(A._undo); ok(A.st.blocks.find((x) => x.id === 'flex').start === oldStart && !A.st.blocks.find((x) => x.id === 'flex').skipped, '撤销同时恢复时区和重排前的任务');
+  A.st.settings.aiOn = false;
+  click('timezone-apply'); ok(!A.st.blocks.find((x) => x.id === 'flex').skipped, '自动排程关闭时不丢失待办');
+  A.st = JSON.parse(previous); delete A.fakeNow;
 }
 
 click('settings'); click('wipe'); click('wipe'); ok(A.st.items.length === 0, '一键删除');

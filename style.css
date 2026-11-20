@@ -415,3 +415,9 @@ html.dragging * { cursor: grabbing !important; }
 .dragmsg { position: fixed; z-index: 90; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top, 0px) + 10px); max-width: calc(100% - 24px); padding: 9px 16px; border-radius: 999px; font-size: 13.5px; font-weight: 650; background: rgba(20,24,32,.88); color: #fff; box-shadow: 0 10px 30px -10px rgba(0,0,0,.5); pointer-events: none; text-align: center; }
 .dragmsg.bad { background: rgba(176,58,46,.94); }
 input[type=time], input[type=date], input[type=datetime-local] { min-height: 44px; border-radius: 14px; }
+.timezone-button { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 600px) {
+  #top { flex-wrap: wrap; }
+  #top > .row { margin-left: auto; flex-shrink: 0; }
+  .timezone-button { max-width: 120px; }
+}

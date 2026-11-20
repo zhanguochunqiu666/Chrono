@@ -14,6 +14,7 @@
   const DOMAIN_KEYS = Object.keys(DOMAINS);
 
   const DEFAULT_SETTINGS = () => ({
+    timeZone: 'system',                       // 显示与新事项使用的时区
     dayStart: 8 * 60, dayEnd: 22 * 60,        // 可用时段(分钟)
     wknd: { on: false, start: 9 * 60, end: 22 * 60 },          // 周末使用不同的可用时段
     commute: { on: false, am: 30, pm: 30, pmAt: 18 * 60 },     // 工作日通勤(硬约束)
@@ -50,13 +51,79 @@
   });
 
   /* ---------- 时间工具 ---------- */
-  const dayStart = (ts) => { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); };
-  const addDays = (ts, n) => { const d = new Date(ts); d.setDate(d.getDate() + n); return d.getTime(); };
-  const weekStart = (ts) => { const d = new Date(dayStart(ts)); const w = (d.getDay() + 6) % 7; return addDays(d.getTime(), -w); };
-  const dow = (ts) => (new Date(ts).getDay() + 6) % 7;   // 周一=0
+  let zoneOverride = null;
+  const formatters = new Map(), partCache = new Map(), validZones = new Map();
+  let deviceZone = null, zoneCheckedAt = 0;
+  const systemTimeZone = () => { if (!deviceZone || Date.now() - zoneCheckedAt > 60000) { deviceZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; zoneCheckedAt = Date.now(); } return deviceZone; };
+  function validTimeZone(zone) { if (!validZones.has(zone)) { try { new Intl.DateTimeFormat('en', { timeZone: zone }); validZones.set(zone, true); } catch (_) { validZones.set(zone, false); } } return validZones.get(zone); }
+  const resolveTimeZone = (zone) => !zone || zone === 'system' || !validTimeZone(zone) ? systemTimeZone() : zone;
+  const selectedTimeZone = () => resolveTimeZone(G.A && G.A.st && G.A.st.settings.timeZone);
+  const timeZone = () => zoneOverride || selectedTimeZone();
+  function withTimeZone(zone, fn) { const previous = zoneOverride; zoneOverride = resolveTimeZone(zone); try { return fn(); } finally { zoneOverride = previous; } }
+  function parts(ts, zone = timeZone()) {
+    const key = zone + ':' + Math.floor(ts / 1000); if (partCache.has(key)) return partCache.get(key);
+    if (!formatters.has(zone)) formatters.set(zone, new Intl.DateTimeFormat('en-GB', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }));
+    const p = {}; formatters.get(zone).formatToParts(new Date(ts)).forEach((v) => { if (v.type !== 'literal') p[v.type] = +v.value; });
+    if (partCache.size > 12000) partCache.clear(); partCache.set(key, p); return p;
+  }
+  const wallStamp = (p) => Date.UTC(p.year, p.month - 1, p.day, p.hour || 0, p.minute || 0, p.second || 0);
+  function fromParts(y, mo, d, h = 0, mi = 0, sec = 0, ms = 0, zone = timeZone()) {
+    const wall = Date.UTC(y, mo, d, h, mi, sec, ms);
+    // 两侧的偏移覆盖夏令时切换。重复时刻取第一次;不存在的时刻向后顺延。
+    const offsets = [...new Set([-36, 0, 36].map((n) => { const t = wall + n * 3600000; return wallStamp(parts(t, zone)) - Math.floor(t / 1000) * 1000; }))];
+    const choices = offsets.map((offset) => wall - offset).sort((a, b) => a - b);
+    const exact = choices.find((t) => wallStamp(parts(t, zone)) === Math.floor(wall / 1000) * 1000);
+    if (exact != null) return exact;
+    return choices.find((t) => wallStamp(parts(t, zone)) >= Math.floor(wall / 1000) * 1000) ?? choices[choices.length - 1];
+  }
+  // 仅用于读取日历字段,时间戳始终保留真实时刻,不修改原生 Date。
+  function date(ts = Date.now(), zone = timeZone()) {
+    const p = parts(ts, zone);
+    return { getFullYear: () => p.year, getMonth: () => p.month - 1, getDate: () => p.day, getHours: () => p.hour, getMinutes: () => p.minute,
+      getDay: () => new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay(), getTime: () => ts };
+  }
+  const makeDate = (...args) => date(fromParts(...args));
+  const dayStart = (ts) => { const p = parts(ts); return fromParts(p.year, p.month - 1, p.day); };
+  const addDays = (ts, n) => { const p = parts(ts); return fromParts(p.year, p.month - 1, p.day + n, p.hour, p.minute, p.second, ((ts % 1000) + 1000) % 1000); };
+  const calendarDiff = (a, b) => Math.round((wallStamp({ ...parts(a), hour: 0, minute: 0, second: 0 }) - wallStamp({ ...parts(b), hour: 0, minute: 0, second: 0 })) / DAY);
+  const dow = (ts) => (date(ts).getDay() + 6) % 7;   // 周一=0
+  const weekStart = (ts) => addDays(dayStart(ts), -dow(ts));
+  const atMinute = (ts, m) => { const p = parts(ts); return fromParts(p.year, p.month - 1, p.day, 0, m); };
+  const minuteOfDay = (ts) => { const p = parts(ts); return p.hour * 60 + p.minute + p.second / 60; };
+  const dayEnd = (ts) => addDays(dayStart(ts), 1) - 1;
+  const dateVal = (ts, zone = timeZone()) => { const p = parts(ts, zone); return p.year + '-' + p2(p.month) + '-' + p2(p.day); };
+  function parseDateTime(value, zone = timeZone()) {
+    const m = String(value || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:T(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+    if (!m || +m[2] < 1 || +m[2] > 12 || +m[3] < 1 || +m[3] > new Date(Date.UTC(+m[1], +m[2], 0)).getUTCDate() || +(m[4] || 0) > 23 || +(m[5] || 0) > 59 || +(m[6] || 0) > 59) return null;
+    return fromParts(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0), 0, resolveTimeZone(zone));
+  }
+  const compareBlocks = (a, b) => a.start - b.start || a.end - b.end || String(a.id || '').localeCompare(String(b.id || ''));
+  // 旧记录的 anchor / hkey 是创建地午夜。优先保留已知时区,避免用接收设备的显示时区重解释它。
+  function inferTimeZone(midnight, preferred) {
+    const fallback = resolveTimeZone(preferred);
+    if (!Number.isFinite(midnight)) return fallback;
+    const isMidnight = (zone) => { const p = parts(midnight, zone); return p.hour === 0 && p.minute === 0 && p.second === 0; };
+    if (isMidnight(fallback)) return fallback;
+    const common = ['UTC', 'Asia/Shanghai', 'Asia/Tokyo', 'America/New_York', 'America/Los_Angeles', 'Europe/London', 'Europe/Paris', 'Asia/Kolkata', 'Asia/Kathmandu', 'Asia/Yangon', 'Asia/Kabul', 'Asia/Tehran', 'Australia/Darwin', 'Australia/Adelaide', 'Australia/Lord_Howe', 'Pacific/Chatham', 'America/St_Johns', 'Pacific/Marquesas'];
+    for (let offset = -12; offset <= 14; offset++) common.push(offset === 0 ? 'UTC' : 'Etc/GMT' + (offset > 0 ? '-' : '+') + Math.abs(offset));
+    return common.find((z) => validTimeZone(z) && isMidnight(z)) || fallback;
+  }
+  function initTimeZones(st) {
+    const zone = resolveTimeZone(st.settings.timeZone), old = st.meta.timeZone || zone;
+    let changed = 0;
+    (st.habits || []).forEach((h) => { if (!h.timeZone || h.timeZone === 'system' || !validTimeZone(h.timeZone)) { h.timeZone = inferTimeZone(h.anchor, old); changed++; } });
+    if (st.settings.term && !st.settings.term.timeZone) { st.settings.term.timeZone = inferTimeZone(st.settings.term.start, old); changed++; }
+    (st.settings.off || []).forEach((o) => { if (!o.timeZone) { o.timeZone = inferTimeZone(o.from, old); changed++; } });
+    st.meta.timeZone = zone;
+    return changed;
+  }
+  function changeTimeZone(st, zone) {
+    if (zone !== 'system' && !validTimeZone(zone)) return false;
+    initTimeZones(st); st.settings.timeZone = zone; st.meta.timeZone = resolveTimeZone(zone); return true;
+  }
   const WD = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
   const p2 = (n) => (n < 10 ? '0' : '') + n;
-  const fmtT = (ts) => { const d = new Date(ts); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
+  const fmtT = (ts) => { const d = date(ts); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
   const fmtM = (m) => p2(Math.floor(m / 60)) + ':' + p2(m % 60);
   const fmtDur = (m) => {
     m = Math.round(m);
@@ -67,9 +134,9 @@
   const fmtH = (m) => (Math.round(m / 6) / 10).toString().replace(/\.0$/, '') + ' 小时';
   const sameDay = (a, b) => dayStart(a) === dayStart(b);
   const dayLabel = (ts, now) => {
-    const diff = Math.round((dayStart(ts) - dayStart(now)) / DAY);
+    const diff = calendarDiff(ts, now);
     if (diff === 0) return '今天'; if (diff === 1) return '明天'; if (diff === 2) return '后天'; if (diff === -1) return '昨天';
-    const d = new Date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + WD[dow(ts)];
+    const d = date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + WD[dow(ts)];
   };
   const ceil15 = (ts) => Math.ceil(ts / (15 * MIN)) * (15 * MIN);
   const uid = (st, p) => (p || 'x') + (st.meta.seq++).toString(36) + Math.random().toString(36).slice(2, 5);
@@ -94,6 +161,7 @@
     return mem || fresh();
   }
   function save(st) {
+    st.blocks.sort(compareBlocks);
     mem = st;
     try { G.localStorage && G.localStorage.setItem(KEY, JSON.stringify(st)); saveFailed = false; }
     catch (e) { if (!saveFailed) { saveFailed = true; if (G.A && G.A.toast) G.A.toast('保存失败:浏览器存储空间不足或被禁用。请在设置里导出 JSON 备份,并清理旧数据。', { ms: 9000 }); } }
@@ -102,14 +170,14 @@
 
   /* ---------- 查询 ---------- */
   const itemOf = (st, id) => st.items.find((i) => i.id === id);
-  const blocksOn = (st, d) => st.blocks.filter((b) => b.start >= d && b.start < d + DAY).sort((a, b) => a.start - b.start);
+  const blocksOn = (st, d) => st.blocks.filter((b) => b.end > d && b.start < addDays(d, 1)).sort(compareBlocks);
   const blockMin = (b) => (b.end - b.start) / MIN;
 
   /* 周内各领域的投入(完成+已排,不含已漏做/跳过) */
   function domainWeek(st, ws) {
     const out = {}; DOMAIN_KEYS.forEach((k) => (out[k] = { done: 0, plan: 0 }));
     st.blocks.forEach((b) => {
-      if (b.start < ws || b.start >= ws + 7 * DAY || b.missed || b.skipped || b.kind === 'free') return;
+      if (b.start < ws || b.start >= addDays(ws, 7) || b.missed || b.skipped || b.kind === 'free') return;
       const o = out[b.domain]; if (!o) return;
       const m = blockMin(b);
       if (b.done) o.done += (b.actual || m); else o.plan += m;
@@ -119,6 +187,7 @@
 
   G.Chrono = Object.assign(G.Chrono || {}, {
     MIN, DAY, DOMAINS, DOMAIN_KEYS, WD, fresh, load, save, wipe, DEFAULT_SETTINGS,
+    systemTimeZone, validTimeZone, resolveTimeZone, selectedTimeZone, timeZone, withTimeZone, parts, fromParts, date, makeDate, dateVal, parseDateTime, atMinute, minuteOfDay, dayEnd, calendarDiff, compareBlocks, initTimeZones, changeTimeZone, inferTimeZone,
     dayStart, addDays, weekStart, dow, fmtT, fmtM, fmtDur, fmtH, sameDay, dayLabel, ceil15, uid, p2,
     itemOf, blocksOn, blockMin, domainWeek,
   });

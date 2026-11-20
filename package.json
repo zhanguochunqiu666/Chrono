@@ -1,10 +1,10 @@
 {
   "name": "chrono-shi-xu",
-  "version": "1.5.3",
+  "version": "1.5.5",
   "private": true,
   "description": "时序 Chrono · 本地优先的个人时间调度",
   "scripts": {
-    "test": "node tests/engine.test.js && node tests/ui-smoke.js && node tests/llm.test.js && node tests/sync.test.js && node tests/holiday.test.js && node tests/routine.test.js && node tests/agent.test.js && node tests/lock.test.js && node tests/overlap.test.js && node tests/pair.test.js && node tests/longterm.test.js && node tests/cloud.test.js && node tests/remote.test.js",
+    "test": "node tests/engine.test.js && node tests/ui-smoke.js && node tests/llm.test.js && node tests/sync.test.js && node tests/holiday.test.js && node tests/routine.test.js && node tests/agent.test.js && node tests/lock.test.js && node tests/overlap.test.js && node tests/pair.test.js && node tests/longterm.test.js && node tests/cloud.test.js && node tests/remote.test.js && node tests/timezone.test.js && node tests/sync-timezone.test.js",
     "serve": "node tools/server.js",
     "www": "node tools/make_www.js",
     "single": "python3 tools/build_single.py",

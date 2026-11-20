@@ -93,11 +93,11 @@
 
   /* ---------- 提示词 ---------- */
   const WD = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-  const ymd = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + C.p2(d.getMonth() + 1) + '-' + C.p2(d.getDate()); };
+  const ymd = (ts) => { const d = C.date(ts); return d.getFullYear() + '-' + C.p2(d.getMonth() + 1) + '-' + C.p2(d.getDate()); };
   function extractSystem(t) {
     return '你是「时序」日程应用的信息提取器。用户会给你截图/照片/文字,里面可能有会议通知、群消息、海报活动、课表、航班/酒店/快递、体检预约、账单、聊天里的约定等。\n' +
       '任务:找出其中所有「用户需要安排或记住的事项」,只输出一个 JSON 对象,不要任何解释。\n' +
-      '当前时间:' + ymd(t) + ' ' + WD[C.dow(t)] + ' ' + C.fmtT(t) + '(时区 Asia/Shanghai)。所有相对日期(明天、下周三、月底)必须换算成具体日期;图中只写月日时,年份取最近的未来日期。\n' +
+      '当前时间:' + ymd(t) + ' ' + WD[C.dow(t)] + ' ' + C.fmtT(t) + '(时区 ' + C.timeZone() + ')。所有相对日期(明天、下周三、月底)必须换算成具体日期;图中只写月日时,年份取最近的未来日期。\n' +
       'JSON 格式:{"items":[{"title":"12字内短标题,保留关键人物/地点","type":"event|task|deadline","date":"YYYY-MM-DD","start":"HH:MM","end":"HH:MM","dur_min":数字,"due":"YYYY-MM-DD","domain":"work|health|relation|study|finance|home","priority":0-3,"location":"","remind_before_min":数字,"travel_min":数字,"confidence":0到1,"evidence":"原文里支撑这一项的一句话"}],"note":"一句话说明没识别出来的内容或不确定之处"}\n' +
       '规则:\n' +
       '1. event=有明确开始时间的约定(会议、航班、预约、课程);必须有 date 和 start。没写结束时间就根据常识给 dur_min。\n' +
@@ -111,7 +111,7 @@
   }
 
   /* ---------- 结果 → 草稿 ---------- */
-  const pd = (s) => { const m = String(s || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]).getTime() : null; };
+  const pd = (s) => { const m = String(s || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); return m ? C.parseDateTime(m[0]) : null; };
   const pt = (s) => { const m = String(s || '').match(/^(\d{1,2}):(\d{2})/); return m ? +m[1] * 60 + +m[2] : null; };
   const clip = (s) => (s.length > 12 ? s.slice(0, 12) : s);
 
@@ -130,20 +130,20 @@
       if (conf < 0.45) d.unclear = true;
       const rem = +o.remind_before_min; if (rem > 0 && rem <= 2880) d.lead = rem;
       if (type === 'event') {
-        let start = date + sm * MIN, dur = em != null && em > sm ? em - sm : Math.max(15, Math.min(720, +o.dur_min || 60));
+        let start = C.atMinute(date, sm), dur = em != null && em > sm ? em - sm : Math.max(15, Math.min(720, +o.dur_min || 60));
         if (start + dur * MIN < t) { skipped.stale++; return; }
         Object.assign(d, { type: 'event', flex: 'fixed', hasClock: true, start, end: start + dur * MIN, estMin: dur, statedMin: dur, conf: 0.9, src: 'stated' });
         const tr = +o.travel_min; if (tr > 0 && tr <= 240) d.travel = tr;
         if (!d.lead) d.lead = 15;
       } else if (type === 'deadline') {
         const dd = due != null ? due : date; if (dd == null) { skipped.bad++; return; }
-        if (dd + DAY < t) { skipped.stale++; return; }
-        Object.assign(d, { type: 'deadline', due: dd + DAY - 1, estMin: 0, conf: 0.9, src: 'stated', lead: d.lead || (domain === 'finance' ? 2 * 1440 : 1440) });
+        if (C.addDays(dd, 1) <= t) { skipped.stale++; return; }
+        Object.assign(d, { type: 'deadline', due: C.dayEnd(dd), estMin: 0, conf: 0.9, src: 'stated', lead: d.lead || (domain === 'finance' ? 2 * 1440 : 1440) });
       } else {
         const dm = +o.dur_min > 0 ? Math.min(720, Math.round(+o.dur_min)) : 0, est = C.estimate(st, domain, energy, dm, false, title);
         Object.assign(d, { type: 'task', estMin: est.min, statedMin: dm, conf: est.conf, src: est.src, learnedFrom: est.stated || 0, splittable: energy === 'deep' || est.min >= 120, minChunk: 60 });
         const dd = due != null ? due : date;
-        if (dd != null) { if (dd + DAY < t) { skipped.stale++; return; } d.due = dd + DAY - 1; d.notBefore = Math.max(t0, 0); delete d.notBefore; }
+        if (dd != null) { if (C.addDays(dd, 1) <= t) { skipped.stale++; return; } d.due = C.dayEnd(dd); d.notBefore = Math.max(t0, 0); delete d.notBefore; }
       }
       out.push(d);
     });

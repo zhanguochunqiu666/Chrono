@@ -74,12 +74,12 @@
       case 'rc-set': A.setCard(+el.dataset.i, el.dataset.f, el.dataset.v); A.drawReceipt(); break;
       case 'rc-when': {
         const i = +el.dataset.i, c = A.rc.cards[i], d = c.d, dv = $('#rcDate' + i).value, tv = $('#rcTime' + i).value;
-        if (dv && tv) { const [h, m] = tv.split(':').map(Number); d.start = A.parseDateVal(dv) + (h * 60 + m) * MIN; d.end = d.start + d.estMin * MIN; c.edits++; }
+        if (dv && tv) { const [h, m] = tv.split(':').map(Number); d.start = C.atMinute(A.parseDateVal(dv), h * 60 + m); d.end = d.start + d.estMin * MIN; c.edits++; }
         c.field = null; A.drawReceipt(); break;
       }
       case 'rc-due': {
         const i = +el.dataset.i, c = A.rc.cards[i], dv = $('#rcDate' + i).value;
-        if (dv) { c.d.due = A.parseDateVal(dv) + DAY - 1; delete c.d.notBefore; c.d.askDue = false; c.edits++; }
+        if (dv) { c.d.due = C.dayEnd(A.parseDateVal(dv)); delete c.d.notBefore; c.d.askDue = false; c.edits++; }
         c.field = null; A.drawReceipt(); break;
       }
       case 'opt': {
@@ -137,7 +137,7 @@
       case 'inbox-del': A.mutate(() => C.removeItem(st, id), '已删除'); break;
       case 'manual': A.manualSheet(id); break;
       case 'manual-ok': {
-        const v = $('#manDt').value; if (!v) break; const ts = new Date(v).getTime(), it = C.itemOf(st, id);
+        const v = $('#manDt').value; if (!v) break; const ts = C.parseDateTime(v), it = C.itemOf(st, id); if (ts == null) { A.toast('请选择有效的日期和时间。'); break; }
         A.closeSheet();
         A.mutate(() => { const need = Math.max(15, C.effMin(it) - C.placedMin(st, id)); st.blocks.push({ id: C.uid(st, 'b'), itemId: id, title: it.short, domain: it.domain, kind: it.energy === 'deep' ? 'focus' : 'admin', start: ts, end: ts + need * MIN, locked: true, ctx: it.ctx, prio: it.priority, why: '你手动安排在这里,系统不会再动它' }); }, '已放好');
         break;
@@ -192,7 +192,7 @@
   A.checkReminders = () => {
     const st = A.st, s = st.settings, t = now(); if (!s.notify || A.focus) return;
     const d0 = C.dayStart(t);
-    st.blocks.forEach((b) => {
+    st.blocks.slice().sort(C.compareBlocks).forEach((b) => {
       if (b.skipped || b.done || b.missed || b.kind === 'free' || b.started) return;
       const it = b.itemId ? C.itemOf(st, b.itemId) : null, lead = it && it.lead && it.lead < 1440 ? it.lead : 15;
       const toStart = (b.start - t) / MIN;
@@ -203,7 +203,7 @@
       if (i.type !== 'deadline' || i.status !== 'planned') return;
       const at = i.due - (i.lead || 1440) * MIN; if (t >= at && t < i.due) A.notify('d:' + i.id, '快到期:' + i.short, C.dayLabel(i.due, t) + '到期', null, false);
     });
-    if (new Date(t).getHours() >= 21) {
+    if (C.date(t).getHours() >= 21) {
       const tm = C.addDays(d0, 1), bl = A.dayBlocks(tm).filter((b) => b.itemId || b.kind === 'commit');
       if (bl.length) { const hv = bl.slice().sort((a, b) => (a.prio - b.prio) || (C.bmin(b) - C.bmin(a)))[0]; A.notify('pre:' + tm, '明天有 ' + bl.length + ' 件事', '最重的是 ' + A.hmm(hv.start) + ' 的「' + hv.title + '」', null, false); }
     }
@@ -231,7 +231,7 @@
   });
 
   function boot() {
-    A.st = C.load();
+    A.st = C.load(); C.initTimeZones(A.st);
     if (C.repairMoved(A.st)) C.save(A.st);
     if (A.st.items.length || A.st.habits.length) { C.plan(A.st, Date.now(), 'inc'); C.save(A.st); }     // 启动时整理一次:让位给硬约束、清掉已有的重叠
     const t = now(), d0 = C.dayStart(t);

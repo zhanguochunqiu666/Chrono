@@ -7,16 +7,17 @@
   const C = G.Chrono, A = G.A, L = A.LLM, { MIN, DAY, DOMAINS } = C;
   const { $, esc, now } = A;
   const WD = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-  const ymd = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + C.p2(d.getMonth() + 1) + '-' + C.p2(d.getDate()); };
-  const pd = (s) => { const m = String(s || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); return m ? new Date(+m[1], +m[2] - 1, +m[3]).getTime() : null; };
+  const ymd = (ts) => { const d = C.date(ts); return d.getFullYear() + '-' + C.p2(d.getMonth() + 1) + '-' + C.p2(d.getDate()); };
+  const pd = (s) => { const m = String(s || '').match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); return m ? C.parseDateTime(m[0]) : null; };
   const pt = (s) => { const m = String(s || '').match(/^(\d{1,2}):(\d{2})/); return m ? +m[1] * 60 + +m[2] : null; };
-  const fmtD = (ts) => (new Date(ts).getMonth() + 1) + '月' + new Date(ts).getDate() + '日 ' + WD[C.dow(ts)];
+  const fmtD = (ts) => (C.date(ts).getMonth() + 1) + '月' + C.date(ts).getDate() + '日 ' + WD[C.dow(ts)];
   const fmtM = (m) => C.fmtM(m);
   const dom = (k, t) => (DOMAINS[k] ? k : C.domainOf(t || ''));
 
   /* ---------- 上下文:让模型看到真实数据(带 ID) ---------- */
   function ctxText() {
     const st = A.st, t = now(), t0 = C.dayStart(t), S = st.settings, L2 = [];
+    L2.push('当前显示和新录入时区: ' + C.timeZone() + '。已有固定周程按各自标注的原时区理解。');
     const T = S.term, wn = C.weekNo(st, t0);
     L2.push('今天:' + ymd(t) + ' ' + WD[C.dow(t)] + ' ' + C.fmtT(t) + ';' + (T ? '学期第 1 周的周一=' + ymd(T.start) + ',共 ' + (T.weeks || '?') + ' 周,今天是第 ' + wn + ' 周' : '尚未设置学期(课表的周次/单双周需要先知道第 1 周是哪天)'));
     const hs = C.Holiday ? C.Holiday.upcoming(t0, 120) : [];
@@ -173,16 +174,16 @@
         if (op.priority != null && op.priority >= 0 && op.priority <= 3) { patch.priority = Math.round(+op.priority); ch.push('优先级 P' + patch.priority); }
         if (DOMAINS[op.domain]) { patch.domain = op.domain; ch.push('领域 ' + DOMAINS[op.domain].name); }
         if (op.location != null) { patch.loc = String(op.location); ch.push('地点 ' + patch.loc); }
-        if (it.type === 'event' && (op.date || op.start)) { const d = pd(op.date) != null ? pd(op.date) : C.dayStart(it.start), s = pt(op.start) != null ? pt(op.start) : (it.start - C.dayStart(it.start)) / MIN; patch.start = d + s * MIN; const dur = patch.estMin || it.estMin; patch.end = patch.start + dur * MIN; if (pt(op.end) != null && pt(op.end) > s && !patch.estMin) { patch.estMin = pt(op.end) - s; patch.end = d + pt(op.end) * MIN; } ch.push('时间改为 ' + fmtD(patch.start) + ' ' + C.fmtT(patch.start)); }
-        if (it.type !== 'event' && (op.due || (op.date && it.type === 'deadline'))) { const d = pd(op.due || op.date); if (d != null) { patch.due = d + DAY - 1; ch.push((it.type === 'deadline' ? '到期日' : '截止') + '改为 ' + fmtD(d)); } }
+        if (it.type === 'event' && (op.date || op.start)) { const d = pd(op.date) != null ? pd(op.date) : C.dayStart(it.start), s = pt(op.start) != null ? pt(op.start) : C.minuteOfDay(it.start); patch.start = C.atMinute(d, s); const dur = patch.estMin || it.estMin; patch.end = patch.start + dur * MIN; if (pt(op.end) != null && pt(op.end) > s && !patch.estMin) { patch.estMin = pt(op.end) - s; patch.end = C.atMinute(d, pt(op.end)); } ch.push('时间改为 ' + fmtD(patch.start) + ' ' + C.fmtT(patch.start)); }
+        if (it.type !== 'event' && (op.due || (op.date && it.type === 'deadline'))) { const d = pd(op.due || op.date); if (d != null) { patch.due = C.dayEnd(d); ch.push((it.type === 'deadline' ? '到期日' : '截止') + '改为 ' + fmtD(d)); } }
         if (!ch.length) return bad('没有要修改的内容');
         return { ok: true, text: '修改「' + it.short + '」:' + ch.join(',') , run: () => { C.editItem(st, it.id, patch, t); } };
       }
       case 'move_item': {
         const it = item(op.id), d = pd(op.date); if (!it || d == null) return bad('找不到这件事或日期');
-        if (it.type === 'event') { const s = pt(op.start) != null ? pt(op.start) : (it.start - C.dayStart(it.start)) / MIN, ns = d + s * MIN; return { ok: true, text: '把「' + it.short + '」挪到 ' + fmtD(ns) + ' ' + C.fmtT(ns), run: () => { C.editItem(st, it.id, { start: ns, end: ns + it.estMin * MIN }, t); } }; }
-        if (it.type === 'deadline') return { ok: true, text: '「' + it.short + '」到期日改为 ' + fmtD(d), run: () => { C.editItem(st, it.id, { due: d + DAY - 1 }, t); } };
-        return { ok: true, text: '把「' + it.short + '」挪到 ' + fmtD(d) + (pt(op.start) != null ? ' ' + op.start : '') + ' 之后再做', run: () => { it.notBefore = d; if (pt(op.start) != null) it.hold = d + pt(op.start) * MIN; if (it.due && it.due < d) it.due = d + DAY - 1; st.blocks.forEach((b) => { if (b.itemId === it.id && !b.done && !b.started) b.skipped = true; }); C.plan(st, t, 'inc'); } };
+        if (it.type === 'event') { const s = pt(op.start) != null ? pt(op.start) : C.minuteOfDay(it.start), ns = C.atMinute(d, s); return { ok: true, text: '把「' + it.short + '」挪到 ' + fmtD(ns) + ' ' + C.fmtT(ns), run: () => { C.editItem(st, it.id, { start: ns, end: ns + it.estMin * MIN }, t); } }; }
+        if (it.type === 'deadline') return { ok: true, text: '「' + it.short + '」到期日改为 ' + fmtD(d), run: () => { C.editItem(st, it.id, { due: C.dayEnd(d) }, t); } };
+        return { ok: true, text: '把「' + it.short + '」挪到 ' + fmtD(d) + (pt(op.start) != null ? ' ' + op.start : '') + ' 之后再做', run: () => { it.notBefore = d; if (pt(op.start) != null) it.hold = C.atMinute(d, pt(op.start)); if (it.due && it.due < d) it.due = C.dayEnd(d); st.blocks.forEach((b) => { if (b.itemId === it.id && !b.done && !b.started) b.skipped = true; }); C.plan(st, t, 'inc'); } };
       }
       case 'delete_item': { const it = item(op.id); if (!it) return bad('找不到这件事'); return { ok: true, danger: true, text: '删除「' + it.short + '」', run: () => { C.removeItem(st, it.id); } }; }
       case 'complete_item': { const it = item(op.id); if (!it) return bad('找不到这件事'); return { ok: true, text: '标记「' + it.short + '」已完成', run: () => { it.status = 'done'; st.blocks.forEach((b) => { if (b.itemId === it.id && !b.done) { b.skipped = true; } }); } }; }

@@ -5,7 +5,38 @@
   const { $, esc, now, tint, hmm } = A;
   const S = () => A.st.settings;
   const pt2 = (v) => { const m = String(v || '').match(/^(\d{1,2}):(\d{2})/); return m ? +m[1] * 60 + +m[2] : null; };
-  const fmtMD = (ts) => { const d = new Date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日'; };
+  const fmtMD = (ts) => { const d = C.date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日'; };
+
+  const zoneNames = { 'Asia/Shanghai': '北京', 'Asia/Taipei': '台北', 'Asia/Hong_Kong': '香港', 'Asia/Tokyo': '东京', 'Asia/Singapore': '新加坡', 'Asia/Kolkata': '新德里', 'Asia/Kathmandu': '加德满都', 'Asia/Dubai': '迪拜', 'Europe/London': '伦敦', 'Europe/Paris': '巴黎', 'America/New_York': '纽约', 'America/Chicago': '芝加哥', 'America/Denver': '丹佛', 'America/Los_Angeles': '洛杉矶', 'Australia/Sydney': '悉尼', 'Pacific/Auckland': '奥克兰', 'UTC': 'UTC' };
+  const zoneLabel = (zone) => zoneNames[zone] || zone.replace(/_/g, ' ');
+  const zoneOptions = (selected) => {
+    const common = Object.keys(zoneNames), all = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
+    const options = [...new Set(['system', ...common, selected, ...all].filter(Boolean))];
+    return options.map((z) => '<option value="' + esc(z) + '" ' + (z === selected ? 'selected' : '') + '>' + esc(z === 'system' ? '跟随设备 · ' + zoneLabel(C.systemTimeZone()) : zoneLabel(z) + (zoneNames[z] && z !== 'UTC' ? ' · ' + z : '')) + '</option>').join('');
+  };
+  A.timeZoneButton = () => '<button class="btn sm timezone-button" data-act="timezone" title="切换时区" aria-label="切换时区">' + esc(zoneLabel(C.timeZone())) + '</button>';
+  A.timeZoneSheet = () => {
+    A.sheet('<h3>时区与安排</h3><div class="lead">切换后,日期、时间轴和新录入的事项都使用所选时区。会议保持实际发生时刻,固定课表和习惯保留原时区。此选择仅用于本设备,同步不会更改其他设备的显示时区。</div><label class="field" for="timeZoneChoice">当前时区</label><select id="timeZoneChoice">' + zoneOptions(S().timeZone || 'system') + '</select><div id="timeZonePreview" class="small muted" style="margin-top:10px"></div><label class="switch"><span><b>按当地作息重排待办</b><span class="small muted" style="display:block">仅重排未来未开始、未锁定的普通待办;可撤销。</span></span><input id="timeZoneReplan" type="checkbox"></label><button class="btn pri" style="width:100%;margin-top:14px" data-act="timezone-apply">应用时区</button>');
+    A.timeZonePreview();
+  };
+  A.timeZonePreview = () => {
+    const input = $('#timeZoneChoice'), out = $('#timeZonePreview'); if (!input || !out) return;
+    out.textContent = C.withTimeZone(input.value || S().timeZone, () => '当地现在: ' + C.dateVal(now()) + ' ' + C.fmtT(now()));
+  };
+  document.addEventListener('change', (e) => { if (e.target.id === 'timeZoneChoice') A.timeZonePreview(); });
+  document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-act]'); if (!el) return;
+    if (el.dataset.act === 'timezone') A.timeZoneSheet();
+    else if (el.dataset.act === 'timezone-apply') {
+      const zone = $('#timeZoneChoice').value, replan = $('#timeZoneReplan').checked;
+      if (zone !== 'system' && !C.validTimeZone(zone)) { A.toast('请选择有效的时区。'); return; }
+      A.closeSheet();
+      A.mutate(() => {
+        C.changeTimeZone(A.st, zone); A.viewDay = null; A.weekOff = 0;
+        if (replan && A.st.settings.aiOn) { A.st.blocks.forEach((b) => { if (b.itemId && !b.habitId && b.kind !== 'commit' && !b.locked && !C.isPinned(b) && !b.done && !b.started && b.start > now()) b.skipped = true; }); C.plan(A.st, now(), 'inc'); }
+      }, '已切换到' + zoneLabel(C.resolveTimeZone(zone)) + (replan && A.st.settings.aiOn ? ',待办已按当地作息重排。' : replan ? '。自动排程已关闭,原安排已保留。' : '。'));
+    }
+  });
 
   A.download = (name, mime, text) => {
     const url = URL.createObjectURL(new Blob([text], { type: mime }));
@@ -16,10 +47,10 @@
   /* ================= 计划 ================= */
   const PPM = 0.72;
   A.viewPlan = () => {
-    const st = A.st, t = now(), s = S(), ws = C.addDays(C.weekStart(t), A.weekOff * 7), [a, z] = C.viewRange(s);
+    const st = A.st, t = now(), s = S(), ws = C.addDays(C.weekStart(t), A.weekOff * 7), [a, z] = A.timelineRange(ws, 7, C.viewRange(s));
     const H = (z - a) * PPM, today = C.dayStart(t);
     let h = '<div class="weekbar"><button class="btn sm" data-act="week" data-v="-1">‹ 上一周</button><button class="btn sm" data-act="week" data-v="0">本周</button><button class="btn sm" data-act="week" data-v="1">下一周 ›</button><span class="grow"></span>' +
-      '<button class="btn sm" data-act="replan">重新排程</button><button class="btn sm" data-act="ics">导出到日历</button></div>';
+      A.timeZoneButton() + '<button class="btn sm" data-act="replan">重新排程</button><button class="btn sm" data-act="ics">导出到日历</button></div>';
     h += '<div class="legend"><span><i style="background:#3E5C9A"></i>专注块(实色)</span><span><i style="background:' + tint('#3E5C9A', .25) + '"></i>事务块(浅色)</span><span><i style="border:1.5px solid #3E5C9A"></i>承诺块(描边)</span><span><i style="border:1px dashed #8A949D"></i>留白</span><span>左侧细带 = 优先级</span></div>';
     h += '<div class="wk" data-a="' + a + '" data-z="' + z + '" data-ppm="' + PPM + '"><div class="wk-in"><div class="wk-h"></div>';
     for (let k = 0; k < 7; k++) {
@@ -34,8 +65,8 @@
       for (let m = Math.ceil(a / 60) * 60; m <= z; m += 60) inner += '<div class="hl" style="top:' + ((m - a) * PPM) + 'px"></div>';
       if (s.lunchOn) inner += '<div class="lunch" style="top:' + ((s.lunch[0] - a) * PPM) + 'px;height:' + ((s.lunch[1] - s.lunch[0]) * PPM - 2) + 'px"></div>';
       (s.zones || []).filter((zn) => zn.dow === k).forEach((zn) => { inner += '<div style="position:absolute;left:0;right:0;top:' + ((zn.start - a) * PPM) + 'px;height:' + ((zn.end - zn.start) * PPM) + 'px;background:repeating-linear-gradient(135deg,transparent 0 5px,var(--rule2) 5px 6px);pointer-events:none"></div>'; });
-      inner += A.dayBlocks(d).map((b) => A.blkHtml(b, d, PPM, a, false)).join('');
-      if (d === today) { const nm = (t - d) / MIN; if (nm >= a && nm <= z) inner += '<div class="nowline" style="left:0;top:' + ((nm - a) * PPM) + 'px"></div>'; }
+      inner += A.timelineHtml(d, PPM, a, false);
+      if (d === today) { const nm = C.minuteOfDay(t); if (nm >= a && nm <= z) inner += '<div class="nowline" style="left:0;top:' + ((nm - a) * PPM) + 'px"></div>'; }
       h += '<div class="wk-col ' + (d === today ? 'today' : '') + (C.isOff(s, d) ? ' away' : '') + '" data-col="' + d + '" style="height:' + H + 'px">' + inner + '</div>';
     }
     h += '</div></div><div class="faint tiny" style="margin:6px 2px">拖动块可手动调整(手机上长按再拖),拖的时候会实时告诉你代价。点一下看「为什么排在这里」。</div>';
@@ -72,7 +103,7 @@
       const r = col.getBoundingClientRect(), g = geo();
       let min = (cy - r.top - D.grab) / g.ppm + g.a; min = Math.round(min / SNAP) * SNAP;
       min = Math.max(g.a, Math.min(g.z - D.dur, min));
-      return { col, day: +col.dataset.col, start: +col.dataset.col + min * MIN, r };
+      return { col, day: +col.dataset.col, start: C.atMinute(+col.dataset.col, min), r };
     };
     const begin = (e, el, resize) => {
       const b = A.st.blocks.find((x) => x.id === el.dataset.id); if (!b) return null;
@@ -97,9 +128,9 @@
       const m = msgEl();
       if (D.resize) {
         const r = (isWk ? D.el.parentNode : D.root).getBoundingClientRect();
-        const sMin = (D.b.start - C.dayStart(D.b.start)) / MIN;
+        const sMin = C.minuteOfDay(D.b.start);
         let em = (cy - r.top) / g.ppm + g.a; em = Math.round(em / SNAP) * SNAP; em = Math.max(sMin + 15, Math.min(g.z, em));
-        D.newEnd = C.dayStart(D.b.start) + em * MIN;
+        D.newEnd = C.atMinute(D.b.start, em);
         D.el.style.height = Math.max((em - sMin) * g.ppm - 2, 22) + 'px';
         const clash = A.st.blocks.find((x) => x.id !== D.b.id && !x.skipped && x.kind !== 'free' && x.start < D.newEnd && x.end > D.b.start);
         m.className = 'dragmsg' + (clash ? ' bad' : ''); m.textContent = hmm(D.b.start) + ' – ' + hmm(D.newEnd) + ' · ' + C.fmtDur(Math.round((D.newEnd - D.b.start) / MIN)) + (clash ? ' · 与「' + clash.title + '」重叠' : '');
@@ -174,7 +205,7 @@
   };
   A.manualSheet = (id) => {
     const it = C.itemOf(A.st, id); if (!it) return;
-    const d = new Date(Math.max(now(), C.dayStart(now()) + S().dayStart * MIN)); d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
+    const d = C.date(C.ceil15(Math.max(now(), C.atMinute(now(), S().dayStart))));
     A.sheet('<h3>手动放置「' + esc(it.short) + '」</h3><div class="lead">你自己选时间,系统不会再动它。</div><input type="datetime-local" id="manDt" value="' + A.dateVal(d.getTime()) + 'T' + A.timeVal(d.getTime()) + '"><button class="btn pri" style="width:100%;margin-top:12px" data-act="manual-ok" data-id="' + id + '">放在这里</button>');
   };
 
@@ -201,7 +232,7 @@
     h += '<h2>生活平衡指数</h2><div class="card score"><div class="big">' + bi + '</div><div class="bars">' + bar('配额达成', qn ? qa / qn : 1) + bar('深度工作', w.deepShare / 0.3) + bar('留白充足', (1 - used / (wm * 7)) / S().freeRatio) + bar('计划稳定', stab) + '</div></div><div class="faint tiny" style="margin:6px 2px">不是 KPI,也不排名。只有连续两周下降时,系统才会说一句「最近有点偏」。</div>';
 
     // 节律热力图
-    const grid = {}; st.blocks.forEach((b) => { if (b.skipped || b.kind === 'free' || b.missed) return; const d = new Date(b.start); const k = C.dow(b.start) + ':' + d.getHours(); grid[k] = (grid[k] || 0) + Math.min(60, C.bmin(b)); });
+    const grid = {}; st.blocks.forEach((b) => { if (b.skipped || b.kind === 'free' || b.missed) return; const d = C.date(b.start); const k = C.dow(b.start) + ':' + d.getHours(); grid[k] = (grid[k] || 0) + Math.min(60, C.bmin(b)); });
     let hm = '<div class="heat"><div></div>' + C.WD.map((x) => '<div style="text-align:center">' + x.slice(1) + '</div>').join('');
     const vr = C.viewRange(S());
     for (let hr = Math.floor(vr[0] / 60); hr < Math.ceil(vr[1] / 60); hr++) {
@@ -253,7 +284,7 @@
     let any = false, rows = '';
     for (let k = 0; k < 14; k++) {
       const d = C.addDays(C.dayStart(t), -k), per = {}; let tot = 0;
-      st.blocks.forEach((b) => { if (b.done && b.start >= d && b.start < d + DAY) { const m = b.actual || C.bmin(b); per[b.domain] = (per[b.domain] || 0) + m; tot += m; } });
+      st.blocks.forEach((b) => { if (b.done && b.start >= d && b.start < C.addDays(d, 1)) { const m = b.actual || C.bmin(b); per[b.domain] = (per[b.domain] || 0) + m; tot += m; } });
       if (tot) any = true;
       rows += '<div class="led"><span class="muted">' + (k === 0 ? '今天' : fmtMD(d).replace('月', '/').replace('日', '')) + '</span><div class="stk">' + DOMAIN_KEYS.map((x) => per[x] ? '<i style="width:' + Math.min(100, per[x] / 600 * 100) + '%;background:' + DOMAINS[x].color + '"></i>' : '').join('') + '</div><span class="muted" style="text-align:right">' + (tot ? C.fmtH(tot) : '—') + '</span></div>';
     }
@@ -276,7 +307,7 @@
   A.evening = () => {
     const t = now(), d0 = C.dayStart(t), all = A.dayBlocks(d0).filter((b) => b.kind !== 'commit');
     const done = all.filter((b) => b.done).length;
-    const open = A.st.blocks.filter((b) => !b.done && !b.skipped && b.itemId && b.kind !== 'commit' && (b.missed || (b.start >= d0 && b.start < d0 + DAY && b.end <= t + 3 * 3600e3)) && b.start < d0 + DAY).slice(0, 8);
+    const open = A.st.blocks.filter((b) => !b.done && !b.skipped && b.itemId && b.kind !== 'commit' && (b.missed || (b.start >= d0 && b.start < C.addDays(d0, 1) && b.end <= t + 3 * 3600e3)) && b.start < C.addDays(d0, 1)).sort(C.compareBlocks).slice(0, 8);
     const tmr = A.dayBlocks(C.addDays(d0, 1)).filter((b) => b.itemId && b.kind !== 'commit');
     A.sheet('<h3>今天收个尾</h3><div class="lead">完成 ' + done + ' / ' + all.length + ' 件。没做完是排程的问题,不是你的问题。</div>' +
       (open.length ? '<div class="small muted" style="margin-bottom:6px">没做完的 ' + open.length + ' 件,怎么处理?</div>' + open.map((b) => '<div class="card"><b>' + esc(b.title) + '</b> <span class="small muted">' + C.dayLabel(b.start, t) + ' ' + hmm(b.start) + '</span><div class="chips" style="margin-top:8px"><button class="chip" data-act="ev-res" data-id="' + b.id + '" data-k="tomorrow">明天</button><button class="chip" data-act="ev-res" data-id="' + b.id + '" data-k="week">本周内</button><button class="chip" data-act="ev-res" data-id="' + b.id + '" data-k="drop">放弃</button></div></div>').join('') : '<div class="card muted">没有遗留。</div>') +
@@ -307,6 +338,7 @@
     const sw = (k, label, sub) => '<div class="switch"><div><b>' + label + '</b><div class="small muted">' + sub + '</div></div><input type="checkbox" data-set="' + k + '" ' + (s[k] ? 'checked' : '') + ' style="width:22px;height:22px;min-height:0"></div>';
     const standalone = G.matchMedia && G.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
     A.sheet('<h3>设置</h3><div class="lead">所有数据只存在这台设备上。</div>' +
+      '<div class="switch"><div><b>时区与安排</b><div class="small muted">当前: ' + esc(zoneLabel(C.timeZone())) + ' · 新录入按此时区理解</div></div>' + A.timeZoneButton() + '</div>' +
       '<label class="field">液态玻璃</label><div class="row" style="gap:10px"><span class="small muted">通透</span><input type="range" min="0" max="1" step="0.05" data-set="glass" value="' + (s.glass == null ? 0.5 : s.glass) + '" class="grow" aria-label="玻璃透明度"><span class="small muted">磨砂</span></div>' +
       '<label class="field">起床 / 开始可用</label><input type="time" data-set="dayStart" value="' + tv(s.dayStart) + '">' +
       '<label class="field">睡觉 / 结束可用(睡眠是硬约束)</label><input type="time" data-set="dayEnd" value="' + tv(s.dayEnd) + '">' +
@@ -325,7 +357,7 @@
       '<div class="row" style="margin-top:14px;gap:8px;flex-wrap:wrap"><button class="btn" data-act="replan">按新设置重新排程</button><button class="btn" data-act="morning">晨间 60 秒</button></div>' +
       '<h2 style="margin-top:20px">数据归你</h2><div class="row" style="flex-wrap:wrap;gap:8px"><button class="btn sm" data-act="ics">导出日历 .ics</button><button class="btn sm" data-act="csv">导出 CSV</button><button class="btn sm" data-act="json">导出 JSON</button><button class="btn sm" data-act="import">导入 JSON</button><button class="btn sm" data-act="import-ics">导入 .ics 日程</button><button class="btn sm warn" data-act="wipe">一键删除全部数据</button></div>' +
       '<h2 style="margin-top:20px">多设备同步</h2>' + (A.Sync ? A.Sync.settingsHtml() : '') + '<h2 style="margin-top:20px">账号与授权</h2>' + (A.Remote ? A.Remote.html() : '') + '<h2 style="margin-top:20px">安装到设备</h2><div class="small muted">' + (standalone ? '已作为应用运行。' : (A._installEvt ? '<button class="btn sm now" data-act="install">安装到这台设备</button><br>' : '') + 'iPhone / iPad:用 Safari 打开 → 分享 → 「添加到主屏幕」。Android / 电脑:浏览器菜单 → 「安装应用」。') + '</div>' +
-      '<div class="small faint" style="margin-top:14px">时序 Chrono v1.0 · 本地优先 · 无账号 · 无云端</div>');
+      '<div class="small faint" style="margin-top:14px">时序 Chrono v1.5.5 · 本地优先</div>');
   };
 
   A.setSetting = (k, v) => {
@@ -338,8 +370,8 @@
         const a = k === 'lunchA' ? mm : s.lunch[0], b = k === 'lunchB' ? mm : s.lunch[1];
         if (b - a < 15 || a < s.dayStart || b > s.dayEnd) { A.toast('午休至少 15 分钟,并且要在可用时段(' + C.fmtM(s.dayStart) + '–' + C.fmtM(s.dayEnd) + ')之内。'); return; }
         s.lunch = [a, b];
-        const t = now(), hit = A.st.blocks.some((x) => !x.skipped && !x.done && !x.started && x.kind !== 'commit' && !C.isPinned(x) && x.start >= t && !x.habitId && C.Holiday !== null && [0, 1].length && (() => { const d0 = C.dayStart(x.start), ls = d0 + a * MIN, le = d0 + b * MIN; return x.start < le && x.end > ls; })());
-        if (hit) { A.st.blocks.forEach((x) => { if (!x.skipped && !x.done && !x.started && x.kind !== 'commit' && !C.isPinned(x) && x.start >= t && !x.habitId) { const d0 = C.dayStart(x.start); if (x.start < d0 + b * MIN && x.end > d0 + a * MIN) x.skipped = true; } }); C.plan(A.st, t, 'inc'); }
+        const t = now(), hit = A.st.blocks.some((x) => !x.skipped && !x.done && !x.started && x.kind !== 'commit' && !C.isPinned(x) && x.start >= t && !x.habitId && C.Holiday !== null && [0, 1].length && (() => { const d0 = C.dayStart(x.start), ls = C.atMinute(d0, a), le = C.atMinute(d0, b); return x.start < le && x.end > ls; })());
+        if (hit) { A.st.blocks.forEach((x) => { if (!x.skipped && !x.done && !x.started && x.kind !== 'commit' && !C.isPinned(x) && x.start >= t && !x.habitId) { const d0 = C.dayStart(x.start); if (x.start < C.atMinute(d0, b) && x.end > C.atMinute(d0, a)) x.skipped = true; } }); C.plan(A.st, t, 'inc'); }
       }
       else if (k === 'ltOn') s.ltRemind = Object.assign({ time: 540, evening: false }, s.ltRemind, { on: !!v });
       else if (k === 'ltEve') s.ltRemind = Object.assign({ time: 540, on: true }, s.ltRemind, { evening: !!v });
@@ -398,8 +430,8 @@
       const id = el.dataset.id, it = C.itemOf(A.st, id); if (!it) return; const g = (i) => { const n = $(i); return n ? n.value : null; };
       const patch = { title: (g('#edTitle') || it.title).trim() || it.title, priority: +g('#edPri'), domain: g('#edDom') };
       if (g('#edDur') != null) { const m = C.parseDurText(g('#edDur')); if (m == null) { A.toast('时长没看懂。试试「90 分钟」「1.5 小时」或「1:30」。'); return; } patch.estMin = m; }
-      if (it.type === 'event') { const dd = g('#edDate'), tt = g('#edTime'); if (dd && tt) { const [h, m] = tt.split(':').map(Number); patch.start = A.parseDateVal(dd) + (h * 60 + m) * MIN; patch.end = patch.start + (patch.estMin || it.estMin) * MIN; } patch.prep = +g('#edPrep') || 0; patch.travel = +g('#edTravel') || 0; patch.loc = (g('#edLoc') || '').trim(); }
-      if (it.type !== 'event') { const du = g('#edDue'); if (du) patch.due = A.parseDateVal(du) + DAY - 1; else if (it.type === 'task') patch.due = null; }
+      if (it.type === 'event') { const dd = g('#edDate'), tt = g('#edTime'); if (dd && tt) { const [h, m] = tt.split(':').map(Number); patch.start = C.atMinute(A.parseDateVal(dd), h * 60 + m); patch.end = patch.start + (patch.estMin || it.estMin) * MIN; } patch.prep = +g('#edPrep') || 0; patch.travel = +g('#edTravel') || 0; patch.loc = (g('#edLoc') || '').trim(); }
+      if (it.type !== 'event') { const du = g('#edDue'); if (du) patch.due = C.dayEnd(A.parseDateVal(du)); else if (it.type === 'task') patch.due = null; }
       if (it.type === 'task') patch.after = g('#edAfter') || null;
       A.closeSheet(); let r;
       A.mutate(() => { r = C.editItem(A.st, id, patch, now()); }, '已更新。其余块未改动。');
@@ -439,7 +471,7 @@
       const sa = pt2(($('#btA') || {}).value), sb = pt2(($('#btB') || {}).value);
       if (sa == null || sb == null) { A.toast('请选择开始和结束时间。'); return; }
       if (sb - sa < 5) { A.toast('结束时间要晚于开始时间(至少 5 分钟)。'); return; }
-      const d0 = C.dayStart(b.start), ns = d0 + sa * MIN, ne = d0 + sb * MIN;
+      const d0 = C.dayStart(b.start), ns = C.atMinute(d0, sa), ne = C.atMinute(d0, sb);
       const clash = st.blocks.find((x) => x.id !== b.id && !x.skipped && x.kind !== 'free' && x.start < ne && x.end > ns);
       A.mutate(() => { b.start = ns; b.end = ne; b.locked = true; b.moved = true; b.why = '你手动设定了时间,系统不会再动它'; }); A.openBlock(b.id);
       A.toast(clash ? '已设为 ' + hmm(ns) + '–' + hmm(ne) + ',但与「' + clash.title + '」重叠了。' : '已设为 ' + hmm(ns) + '–' + hmm(ne) + '。');
@@ -501,7 +533,7 @@
     A.sheet('<h3>' + (nw ? '添加固定周程' : '管理「' + esc(d.title) + '」') + '</h3><div class="lead">每周自动出现的安排,是硬约束(别人的时间),其他事项会绕开它。同一门课每周有几个不同时间,就各加一条同名的。</div>' +
       '<label class="field">名称</label><input type="text" id="rtTitle" value="' + esc(d.title) + '">' +
       '<label class="field">星期</label><div class="chips" id="rtDays">' + C.WD.map((x, i) => '<button class="chip" data-act="rt-day" data-d="' + i + '" aria-pressed="' + (d.days || []).includes(i) + '">' + x.slice(1) + '</button>').join('') + '</div>' +
-      '<label class="field">上课 / 下课</label><div class="row"><input type="time" id="rtA" value="' + C.fmtM(d.time) + '"><input type="time" id="rtB" value="' + C.fmtM(d.time + d.dur) + '"></div>' +
+      '<label class="field">上课 / 下课 · ' + esc(zoneLabel(d.timeZone || C.timeZone())) + '</label><div class="row"><input type="time" id="rtA" value="' + C.fmtM(d.time) + '"><input type="time" id="rtB" value="' + C.fmtM(d.time + d.dur) + '"></div>' +
       '<label class="field">周次(可选,如 1-8,10-16;需要先设置学期)</label><input type="text" id="rtWk" value="' + wk + '" placeholder="不填 = 整个学期" autocomplete="off">' +
       '<label class="field">单双周</label><select id="rtPar"><option value="all" ' + (d.parity === 'all' ? 'selected' : '') + '>每周</option><option value="odd" ' + (d.parity === 'odd' ? 'selected' : '') + '>仅单周</option><option value="even" ' + (d.parity === 'even' ? 'selected' : '') + '>仅双周</option></select>' +
       '<label class="field">地点</label><input type="text" id="rtLoc" value="' + esc(d.loc || '') + '">' +
@@ -539,7 +571,7 @@
       const dv = $('#tmDate').value, wv = +$('#tmWeek').value, tot = +$('#tmTotal').value || 18; let start = null;
       if (dv) start = C.weekStart(A.parseDateVal(dv)); else if (wv >= 1) start = C.addDays(C.weekStart(C.dayStart(t)), -(wv - 1) * 7);
       if (start == null) { A.toast('请填写第 1 周的周一,或今天是第几周。'); return; }
-      A.closeSheet(); A.mutate(() => { st.settings.term = { start, weeks: tot }; C.plan(st, t, 'full'); }, '已设置学期。');
+      A.closeSheet(); A.mutate(() => { st.settings.term = { start, weeks: tot, timeZone: C.timeZone() }; C.plan(st, t, 'full'); }, '已设置学期。');
     } else if (a === 'term-clear') { A.closeSheet(); A.mutate(() => { st.settings.term = null; C.plan(st, t, 'full'); }, '已清除学期设置。'); }
   });
 

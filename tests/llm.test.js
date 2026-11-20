@@ -42,7 +42,7 @@ const payload = { items: [
   ok(lastReq.url === 'https://api.anthropic.com/v1/messages', '请求地址正确');
   ok(lastReq.opt.headers['x-api-key'] === 'sk-test' && lastReq.opt.headers['anthropic-dangerous-direct-browser-access'] === 'true', '请求头含密钥与浏览器直连标记');
   ok(lastReq.body.messages[0].content[0].type === 'image' && lastReq.body.messages[0].content[0].source.data === 'AAAA', '图片以 base64 随请求发送');
-  ok(/当前时间/.test(lastReq.body.system) && /Asia\/Shanghai/.test(lastReq.body.system), '提示词带当前时间,便于换算「下周三」');
+  ok(/当前时间/.test(lastReq.body.system) && lastReq.body.system.includes(C.timeZone()), '提示词带当前时间和所选时区,便于换算「下周三」');
   ok(res.drafts.length === 5, '解析出 5 项(过期与空标题被丢弃): ' + res.drafts.map((d) => d.short).join('、'));
   ok(res.skipped.stale === 1 && res.skipped.bad === 1, '过期 1 项、无效 1 项被忽略');
   const ev = res.drafts[0]; ok(ev.type === 'event' && C.fmtT(ev.start) === '15:00' && ev.estMin === 90 && ev.lead === 30 && ev.travel === 20 && ev.loc === '3楼会议室', '会议:起止/提前量/路上/地点');

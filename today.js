@@ -4,8 +4,8 @@
   const C = G.Chrono, A = G.A, { MIN, DAY, DOMAINS } = C;
   const { $, esc, now, hmm, KIND, ICON } = A;
   const S = () => A.st.settings;
-  const fmtMD = (ts) => { const d = new Date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日'; };
-  const MONTH = (ts) => new Date(ts).getFullYear() + ' 年 ' + (new Date(ts).getMonth() + 1) + ' 月';
+  const fmtMD = (ts) => { const d = C.date(ts); return (d.getMonth() + 1) + '月' + d.getDate() + '日'; };
+  const MONTH = (ts) => C.date(ts).getFullYear() + ' 年 ' + (C.date(ts).getMonth() + 1) + ' 月';
 
   A.viewDay = null;   // null = 今天
 
@@ -22,7 +22,7 @@
     let h = '<div class="strip glass" role="tablist" aria-label="选择日期"><button class="sn" data-act="day-nav" data-v="-7" aria-label="上一周">‹</button>';
     for (let k = 0; k < 7; k++) {
       const d = C.addDays(ws, k), load = C.dayLoad(A.st, d), cap = C.dayCap(s, d), p = Math.min(1, load / Math.max(1, cap));
-      h += '<button class="sd' + (d === d0 ? ' on' : '') + (d === real0 ? ' td' : '') + (C.isOff(s, d) ? ' away' : '') + (A.dayBlocks(d).length ? ' has' : '') + '"' + (hol(d) ? ' title="' + hol(d).long + '"' : '') + ' role="tab" aria-selected="' + (d === d0) + '" data-act="day" data-d="' + d + '"><span class="w">' + C.WD[k].slice(1) + '</span><span class="n">' + new Date(d).getDate() + '</span>' + (hol(d) ? '<em class="hb ' + hol(d).cls + '">' + hol(d).text + '</em>' : '') + '<i class="ld ' + (load > cap ? 'over' : '') + '"><b style="height:' + Math.round(p * 100) + '%"></b></i></button>';
+      h += '<button class="sd' + (d === d0 ? ' on' : '') + (d === real0 ? ' td' : '') + (C.isOff(s, d) ? ' away' : '') + (A.dayBlocks(d).length ? ' has' : '') + '"' + (hol(d) ? ' title="' + hol(d).long + '"' : '') + ' role="tab" aria-selected="' + (d === d0) + '" data-act="day" data-d="' + d + '"><span class="w">' + C.WD[k].slice(1) + '</span><span class="n">' + C.date(d).getDate() + '</span>' + (hol(d) ? '<em class="hb ' + hol(d).cls + '">' + hol(d).text + '</em>' : '') + '<i class="ld ' + (load > cap ? 'over' : '') + '"><b style="height:' + Math.round(p * 100) + '%"></b></i></button>';
     }
     return h + '<button class="sn" data-act="day-nav" data-v="7" aria-label="下一周">›</button></div>';
   }
@@ -59,34 +59,34 @@
       const rest = pending.filter((b) => b !== nxt).slice(0, 4);
       if (rest.length) html += '<div class="upnext glass">' + rest.map((b) => '<button class="it" data-act="blk" data-id="' + b.id + '" style="--c:' + (DOMAINS[b.domain] || DOMAINS.work).color + '"><span class="tm">' + hmm(b.start) + '</span><i class="bar"></i><span class="tt">' + esc(b.title) + '</span><span class="du">' + C.fmtDur(C.bmin(b)) + '</span></button>').join('') + '</div>';
       const inbox = st.items.filter((i) => i.status === 'inbox').length;
-      html += '<div class="rituals"><button class="btn sm" data-act="morning">晨间 60 秒</button><button class="btn sm" data-act="evening">' + (new Date(t).getHours() >= 17 ? '晚间收尾' : '晚间 60 秒') + '</button>' + (inbox ? '<button class="btn sm" data-act="tab" data-v="plan">收件箱 ' + inbox + '</button>' : '') + '</div>';
+      html += '<div class="rituals"><button class="btn sm" data-act="morning">晨间 60 秒</button><button class="btn sm" data-act="evening">' + (C.date(t).getHours() >= 17 ? '晚间收尾' : '晚间 60 秒') + '</button>' + (inbox ? '<button class="btn sm" data-act="tab" data-v="plan">收件箱 ' + inbox + '</button>' : '') + '</div>';
     } else {
       const load = C.dayLoad(st, d0), cap = C.dayCap(s, d0);
       html += '<section class="card sumday"><div class="row between"><div><div class="num" style="font-size:20px">' + (bl.length ? bl.length + ' 个块' : '这天还没有安排') + '</div><div class="small muted">已排 ' + C.fmtH(load) + ' / 可承载 ' + C.fmtH(cap) + (load > cap ? ' · 超出了' : '') + '</div></div><button class="btn sm" data-act="day" data-d="' + real0 + '">回到今天</button></div></section>';
     }
 
-    const dls = st.items.filter((i) => i.type === 'deadline' && i.status === 'planned' && i.due >= d0 && i.due < d0 + 3 * DAY);
+    const dls = st.items.filter((i) => i.type === 'deadline' && i.status === 'planned' && i.due >= d0 && i.due < C.addDays(d0, 3)).sort((a, b) => a.due - b.due || String(a.id).localeCompare(String(b.id)));
     if (dls.length) html += '<div class="deadlines">' + dls.map((i) => '<span class="dlchip" style="--c:' + DOMAINS[i.domain].color + '">' + C.dayLabel(i.due, t) + '到期 · ' + esc(i.short) + ' <button class="chip" style="min-height:22px;padding:0 8px" data-act="dl-done" data-id="' + i.id + '">已处理</button></span>').join('') + '</div>';
 
     // 时间轴
-    const [a, z] = C.bounds(s, d0), ppm = 1.1, H = (z - a) * ppm;
+    const [a, z] = A.timelineRange(d0, 1, C.bounds(s, d0)), ppm = 1.1, H = (z - a) * ppm;
     let grid = '';
     for (let m = Math.ceil(a / 60) * 60; m <= z; m += 60) { const y = (m - a) * ppm; grid += '<div class="hl" style="top:' + y + 'px"></div><div class="hr" style="top:' + y + 'px">' + C.fmtM(m) + '</div>'; }
     if (s.lunchOn) grid += '<div class="lunch" style="top:' + ((s.lunch[0] - a) * ppm) + 'px;height:' + ((s.lunch[1] - s.lunch[0]) * ppm - 2) + 'px">午休 · 留白</div>';
     if (C.commuteOn(s, d0)) {
-      grid += '<div class="lunch" style="top:0;height:' + (s.commute.am * ppm - 2) + 'px">通勤</div><div class="lunch" style="top:' + ((s.commute.pmAt - a) * ppm) + 'px;height:' + (s.commute.pm * ppm - 2) + 'px">通勤</div>';
+      grid += '<div class="lunch" style="top:' + ((C.bounds(s, d0)[0] - a) * ppm) + 'px;height:' + (s.commute.am * ppm - 2) + 'px">通勤</div><div class="lunch" style="top:' + ((s.commute.pmAt - a) * ppm) + 'px;height:' + (s.commute.pm * ppm - 2) + 'px">通勤</div>';
     }
     if (C.isOff(s, d0)) grid += '<div class="lunch away" style="top:0;height:' + (H - 2) + 'px">' + esc(((s.off || []).find((o) => d0 >= o.from && d0 <= o.to) || {}).label || '休假') + ' · 不排任务</div>';
-    grid += bl.map((b) => A.blkHtml(b, d0, ppm, a, true)).join('');
-    const nm = (t - d0) / MIN;
+    grid += A.timelineHtml(d0, ppm, a, true);
+    const nm = C.minuteOfDay(t);
     if (isToday && nm >= a && nm <= z) grid += '<div class="nowline" style="top:' + ((nm - a) * ppm) + 'px"><span>' + hmm(t) + '</span></div>';
     html += '<h2>时间轴<span class="aux">块的高度与时长成正比 · 点一下看「为什么排在这里」</span></h2><div class="tl"><div class="tl-grid" data-col="' + d0 + '" data-a="' + a + '" data-z="' + z + '" data-ppm="' + ppm + '" style="height:' + H + 'px">' + grid + '</div></div>';
     if (!bl.length) html += '<div class="empty" style="padding-top:18px">时间轴空着。录入后,每一块都会告诉你为什么排在那里。</div>';
 
     const wdn = C.WD[C.dow(d0)];
-    const top = '<div class="datehead"><div class="bigday">' + new Date(d0).getDate() + '</div><div class="dm"><div class="dw">' + wdn + (isToday ? ' · 今天' : '') + '</div><div class="ym">' + MONTH(d0) + (st.settings.term && C.weekNo(st, d0) >= 1 ? ' · 第 ' + C.weekNo(st, d0) + ' 周' : '') + (ht ? ' · ' + ht.name + (ht.cls === 'off' ? '(放假)' : '(补班)') : '') + '</div></div></div>' +
-      '<div class="row">' + ring(done, bl.length) + '<button class="iconbtn" data-act="search" aria-label="搜索">' + ICON.search + '</button><button class="iconbtn" data-act="settings" aria-label="设置">' + ICON.gear + '</button></div>';
-    const sub = isToday ? (pending.length ? '还剩 ' + pending.length + ' 件事' + (heaviest ? ',最重的是「' + esc(heaviest.title) + '」' : '') : (bl.length ? '今天的安排都完成了' : '')) : '';
+    const top = '<div class="datehead"><div class="bigday">' + C.date(d0).getDate() + '</div><div class="dm"><div class="dw">' + wdn + (isToday ? ' · 今天' : '') + '</div><div class="ym">' + MONTH(d0) + (st.settings.term && C.weekNo(st, d0) >= 1 ? ' · 第 ' + C.weekNo(st, d0) + ' 周' : '') + (ht ? ' · ' + ht.name + (ht.cls === 'off' ? '(放假)' : '(补班)') : '') + '</div></div></div>' +
+      '<div class="row">' + A.timeZoneButton() + ring(done, bl.length) + '<button class="iconbtn" data-act="search" aria-label="搜索">' + ICON.search + '</button><button class="iconbtn" data-act="settings" aria-label="设置">' + ICON.gear + '</button></div>';
+    const sub = isToday ? (pending.length ? '还剩 ' + pending.length + ' 件事' + (heaviest ? ',最重的是「' + esc(heaviest.title) + '」' : '') : (bl.length ? done === bl.length ? '今天的安排都完成了' : '今日时段已结束 · 完成 ' + done + ' / ' + bl.length : '')) : '';
     return { top: top + (sub ? '' : ''), banners: A.banners(), after: () => A.initDrag && A.initDrag(), html: (sub ? '<div class="subline">' + sub + '</div>' : '') + html };
   };
 

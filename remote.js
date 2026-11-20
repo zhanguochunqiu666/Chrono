@@ -4,7 +4,7 @@
 (function (G) {
   'use strict';
   const C = G.Chrono, A = G.A, { $, esc, now } = A;
-  const VERSION = '1.5.3', REPO = '';                         // REPO:填上你的 GitHub 地址,设置页会显示「源代码」链接(AGPL 建议)
+  const VERSION = '1.5.5', REPO = '';                         // REPO:填上你的 GitHub 地址,设置页会显示「源代码」链接(AGPL 建议)
   const LS = (k, v) => { try { if (v === undefined) return G.localStorage.getItem(k); if (v === null) G.localStorage.removeItem(k); else G.localStorage.setItem(k, v); } catch (e) { /* */ } return null; };
   const cmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 3; i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d < 0 ? -1 : 1; } return 0; };
   const base = () => { const o = (G.location && /^https?:$/.test(location.protocol) && !/^(localhost|127\.|\[::1\])/.test(location.hostname)) ? location.origin : (LS('chrono.cloud') || ''); return String(o).replace(/\/+$/, ''); };

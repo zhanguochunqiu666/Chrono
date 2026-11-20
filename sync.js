@@ -11,6 +11,12 @@
   const COLL = ['items', 'habits', 'blocks', 'longterm'];
   const KEY = 'chrono.sync';
   const TOMB_KEEP = 30 * DAY;
+  const clone = (o) => JSON.parse(JSON.stringify(o));
+  const sharedSettings = (s) => { const out = clone(s || {}); delete out.timeZone; return out; };
+  const nextVersion = (previous, t) => Math.max(t, ((previous && previous.u) || 0) + 1);
+  // 同毫秒修改也必须在每台设备选出同一结果;删除优先。
+  const winner = (l, r) => !l ? r : !r ? l : r.u !== l.u ? (r.u > l.u ? r : l) :
+    !!r.del !== !!l.del ? (r.del ? r : l) : (JSON.stringify(r.d) > JSON.stringify(l.d) ? r : l);
 
   /* ---------- 纯函数:收集 / 合并 / 应用(便于测试) ---------- */
   function hash(o) {                       // cyrb53
@@ -28,12 +34,12 @@
       const v = (ver[k] = ver[k] || {}), seen = new Set();
       (st[k] || []).forEach((r) => {
         seen.add(r.id); const h = hash(r);
-        if (!v[r.id] || v[r.id].del || v[r.id].h !== h) v[r.id] = { h, u: t };
-        ents[k][r.id] = { u: v[r.id].u, d: r };
+        if (!v[r.id] || v[r.id].del || v[r.id].h !== h) v[r.id] = { h, u: nextVersion(v[r.id], t) };
+        ents[k][r.id] = { u: v[r.id].u, d: clone(r) };
       });
       Object.keys(v).forEach((id) => {
         if (seen.has(id)) return;
-        if (!v[id].del) v[id] = { del: true, u: t };
+        if (!v[id].del) v[id] = { del: true, u: nextVersion(v[id], t) };
         if (t - v[id].u > TOMB_KEEP) { delete v[id]; return; }
         ents[k][id] = { u: v[id].u, del: true };
       });
@@ -41,8 +47,9 @@
     const sv = (ver.single = ver.single || {});
     const pristine = !Object.keys(sv).length && !(st.items || []).length && !(st.habits || []).length && !(st.blocks || []).length;   // 全新设备首次加入:不用默认设置覆盖云端
     ['settings', 'stats'].forEach((k) => {
-      const h = hash(st[k]); if (!sv[k] || sv[k].h !== h) sv[k] = { h, u: pristine ? 0 : t };
-      single[k] = { u: sv[k].u, d: st[k] };
+      const d = k === 'settings' ? sharedSettings(st[k]) : clone(st[k]);
+      const h = hash(d); if (!sv[k] || sv[k].h !== h) sv[k] = { h, u: pristine ? 0 : nextVersion(sv[k], t) };
+      single[k] = { u: sv[k].u, d };
     });
     return { ents, single };
   }
@@ -54,17 +61,26 @@
       const L = local.ents[k] || {}, R = (remote && remote.ents && remote.ents[k]) || {};
       new Set(Object.keys(L).concat(Object.keys(R))).forEach((id) => {
         const l = L[id], r = R[id]; let pick;
-        if (!l) pick = r; else if (!r) pick = l; else pick = r.u > l.u ? r : l;
+        pick = winner(l, r);
         out.ents[k][id] = pick;
-        if (pick === r && pick !== l) { if (!l || l.u !== r.u) out.fromRemote++; }
-        if (pick === l && (!r || r.u < l.u)) out.needPush = true;
+        if (pick === r && hash(l || null) !== hash(r)) out.fromRemote++;
+        if (pick === l && hash(r || null) !== hash(l)) out.needPush = true;
+        // 已确认的重复标记不被离线旧副本抹掉,同时保留记录内容以便恢复。
+        const archived = k === 'blocks' && [l, r].find((p) => p && p.d && p.d.duplicateOf);
+        if (archived && pick && pick.d && (!pick.d.duplicateOf || !pick.d.skipped)) {
+          out.ents[k][id] = { u: Math.max(l ? l.u : 0, r ? r.u : 0) + 1, d: { ...clone(pick.d), skipped: true, duplicateOf: archived.d.duplicateOf } };
+          out.fromRemote++; out.needPush = true;
+        }
       });
     });
     ['settings', 'stats'].forEach((k) => {
-      const l = local.single[k], r = remote && remote.single && remote.single[k];
+      let l = local.single[k], r = remote && remote.single && remote.single[k];
+      if (k === 'settings') { l = { ...l, d: sharedSettings(l.d) }; if (r) r = { ...r, d: sharedSettings(r.d) }; }
       if (!r) { out.single[k] = l; out.needPush = true; return; }
       if (k === 'stats') { out.single[k] = { u: Math.max(l.u, r.u), d: mergeStats(l.d, r.d) }; if (hash(out.single[k].d) !== hash(r.d)) out.needPush = true; if (hash(out.single[k].d) !== hash(l.d)) out.fromRemote++; return; }
-      out.single[k] = r.u > l.u ? r : l; if (r.u > l.u) out.fromRemote++; if (l.u > r.u) out.needPush = true;
+      out.single[k] = winner(l, r);
+      if (out.single[k] === r && hash(l) !== hash(r)) out.fromRemote++;
+      if (out.single[k] === l && hash(l) !== hash(r)) out.needPush = true;
     });
     return out;
   }
@@ -78,36 +94,41 @@
 
   /* 把合并结果写回状态,同时刷新 ver;随后去重 */
   function apply(st, merged, ver) {
+    const displayZone = st.settings.timeZone || 'system';
+    const zones = new Map((st.habits || []).filter((h) => h.timeZone && h.timeZone !== 'system').map((h) => [h.id, h.timeZone]));
     COLL.forEach((k) => {
       const v = (ver[k] = ver[k] || {}), arr = [];
       Object.keys(merged.ents[k]).forEach((id) => {
         const p = merged.ents[k][id];
         if (p.del) { v[id] = { del: true, u: p.u }; return; }
-        arr.push(p.d); v[id] = { h: hash(p.d), u: p.u };
+        const d = clone(p.d); arr.push(d); v[id] = { h: hash(p.d), u: p.u };
+        if (k === 'habits' && (!d.timeZone || d.timeZone === 'system') && zones.has(id)) d.timeZone = zones.get(id);
       });
       st[k] = arr;
     });
     const sv = (ver.single = ver.single || {});
-    ['settings', 'stats'].forEach((k) => { st[k] = merged.single[k].d; sv[k] = { h: hash(st[k]), u: merged.single[k].u }; });
+    ['settings', 'stats'].forEach((k) => { st[k] = clone(merged.single[k].d); sv[k] = { h: hash(k === 'settings' ? sharedSettings(st[k]) : st[k]), u: merged.single[k].u }; });
+    st.settings.timeZone = displayZone;
     return dedupe(st, ver);
   }
 
   /* 两台设备各自给同一件事排了一遍 → 只留最新的一份 */
   function dedupe(st, ver) {
-    let n = 0; const skip = (b) => { b.skipped = true; ver.blocks[b.id] = { h: hash(b), u: Date.now() }; n++; };
+    ver.blocks = ver.blocks || {};
+    let n = C.repairRecurring(st, ver.blocks).changed;
+    const skip = (b) => { b.skipped = true; n++; };
     const live = st.blocks.filter((b) => !b.skipped && !b.done && !b.started && b.kind !== 'commit' && !b.locked);
-    const byItem = {}, byKey = {};
-    live.forEach((b) => { if (b.hkey) (byKey[b.hkey] = byKey[b.hkey] || []).push(b); else if (b.itemId) (byItem[b.itemId] = byItem[b.itemId] || []).push(b); });
-    Object.keys(byKey).forEach((k) => { const g = byKey[k].sort((a, b) => ((ver.blocks[b.id] || {}).u || 0) - ((ver.blocks[a.id] || {}).u || 0)); g.slice(1).forEach(skip); });
+    const byItem = {};
+    live.forEach((b) => { if (!b.hkey && b.itemId) (byItem[b.itemId] = byItem[b.itemId] || []).push(b); });
     Object.keys(byItem).forEach((id) => {
       const it = C.itemOf(st, id); if (!it) return; const need = C.effMin(it);
       const done = st.blocks.filter((b) => b.itemId === id && b.done).reduce((a, b) => a + C.bmin(b), 0);
-      let got = done; const g = byItem[id].sort((a, b) => ((ver.blocks[b.id] || {}).u || 0) - ((ver.blocks[a.id] || {}).u || 0));
+      let got = done; const g = byItem[id].sort((a, b) => ((ver.blocks[b.id] || {}).u || 0) - ((ver.blocks[a.id] || {}).u || 0) || String(a.id).localeCompare(String(b.id)));
       g.forEach((b) => { if (got >= need - 1) skip(b); else got += C.bmin(b); });
     });
     // 已丢弃的块超过 3 天就清掉,避免无限增长
     const cut = Date.now() - 3 * DAY, before = st.blocks.length;
-    st.blocks = st.blocks.filter((b) => !(b.skipped && b.end < cut));
+    st.blocks = st.blocks.filter((b) => !(b.skipped && !b.hkey && b.end < cut));
     if (st.log && st.log.length > 400) st.log = st.log.slice(-400);
     return n + (before - st.blocks.length);
   }
@@ -174,13 +195,16 @@
     if (busy && manual && Date.now() - busyAt > 20000) busy = false;            // 上一次卡死了:强制解除
     if (busy) { if (manual) A.toast('正在同步中,请稍等…'); return { skipped: true }; } busy = true; busyAt = Date.now();
     try {
-      const { room } = await derive(c.code), t = Date.now(); let pulled = 0, pushed = false;
+      const { room } = await derive(c.code), t = Date.now(); let pulled = 0, pushed = false, finished = false, repaired = 0;
       for (let attempt = 0; attempt < 4; attempt++) {
         const g = await http(c, 'GET', room);
         if (g.status !== 200 && g.status !== 404) throw new Error(hint(g.status));
         const remote = g.status === 200 && g.j.blob ? await open(c.code, g.j.blob) : null, rev = g.status === 200 ? g.j.rev : 0;
         const local = collect(A.st, c.ver, t), merged = merge(local, remote);
-        const changed = apply(A.st, merged, c.ver); pulled = merged.fromRemote;
+        const changed = apply(A.st, merged, c.ver); pulled += merged.fromRemote; repaired += changed;
+        // 上传实际修复后的状态,并为修复和删除推进版本号,不复用合并前的快照。
+        const repairedState = collect(A.st, c.ver, Date.now());
+        const repairPush = hash(repairedState.ents) !== hash(merged.ents) || hash(repairedState.single) !== hash(merged.single);
         /* 大模型配置(含密钥)一起同步:同样端到端加密,后改者生效;空配置不会覆盖已有的 */
         let llmPush = false;
         if (A.LLM) {
@@ -190,18 +214,20 @@
           if (rl && rl.d && (rl.u || 0) > (c.llmU || 0) && hash(rl.d) !== lh) { A.LLM.setCfg(Object.assign({}, rl.d, { consent: lc.consent || rl.d.consent })); c.llmH = hash(A.LLM.getCfg()); c.llmU = rl.u; pulled++; }
           else if (!rl || (c.llmU || 0) > (rl.u || 0)) llmPush = !!(c.llmU);
         }
-        if (merged.fromRemote || changed) { C.save.__raw ? C.save.__raw(A.st) : C.save(A.st); }
-        if (merged.needPush || changed || !remote || llmPush) {
-          const payload = { v: 1, t, dev: c.dev || '', ents: merged.ents, single: merged.single, log: (A.st.log || []).slice(-300), meta: {}, llm: A.LLM && c.llmU ? { u: c.llmU, d: A.LLM.getCfg() } : (remote && remote.llm) || undefined };
+        if (merged.fromRemote || changed || repairPush) { C.save.__raw ? C.save.__raw(A.st) : C.save(A.st); }
+        if (merged.needPush || changed || repairPush || !remote || llmPush) {
+          const payload = { v: 1, t, dev: c.dev || '', ents: repairedState.ents, single: repairedState.single, log: (A.st.log || []).slice(-300), meta: {}, llm: A.LLM && c.llmU ? { u: c.llmU, d: A.LLM.getCfg() } : (remote && remote.llm) || undefined };
           const p = await http(c, 'PUT', room, { rev, blob: await seal(c.code, payload) });
           if (p.status === 409) continue;
           if (p.status !== 200) throw new Error(p.status === 413 ? '数据太大,服务器拒绝了。可先导出备份并清理旧数据。' : hint(p.status));
           c.rev = p.j.rev; pushed = true;
         } else c.rev = rev;
-        break;
+        finished = true; break;
       }
+      if (!finished) throw new Error('其他设备正在同时同步,本机改动已保留。请稍后再点立即同步。');
       c.last = Date.now(); c.status = { ok: true, t: c.last, pulled, pushed }; setCfg(c);
-      if (pulled) { A.render(); if (manual) A.toast('已同步:收到 ' + pulled + ' 处更新' + (pushed ? ',并上传了本机改动' : '') + '。'); }
+      if (pulled || repaired) A.render();
+      if (pulled) { if (manual) A.toast('已同步:收到 ' + pulled + ' 处更新' + (pushed ? ',并上传了本机改动' : '') + '。'); }
       else if (manual) A.toast(pushed ? '已同步:本机改动已上传。' : '已是最新。');
       return { pulled, pushed };
     } catch (e) {

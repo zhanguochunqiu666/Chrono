@@ -101,14 +101,37 @@
     }
     return out;
   };
-  const dayBlocks = (d) => A.st.blocks.filter((b) => b.start >= d && b.start < d + DAY && !b.skipped && b.kind !== 'free').sort((a, b) => a.start - b.start);
+  const dayBlocks = (d) => C.blocksOn(A.st, d).filter((b) => !b.skipped && b.kind !== 'free');
   A.dayBlocks = dayBlocks;
+  const blockSpan = (b, d) => {
+    const end = C.addDays(d, 1), start = Math.max(d, b.start), stop = Math.min(end, b.end);
+    const a = start === d ? 0 : C.minuteOfDay(start), z = stop === end ? 1440 : C.minuteOfDay(stop);
+    return [a, z > a ? z : Math.min(1440, a + (stop - start) / MIN)];
+  };
+  A.timelineRange = (day, days, base) => {
+    let [a, z] = base;
+    for (let k = 0; k < days; k++) { const d = C.addDays(day, k); dayBlocks(d).forEach((b) => { const [lo, hi] = blockSpan(b, d); a = Math.min(a, Math.floor(lo / 60) * 60); z = Math.max(z, Math.ceil(hi / 60) * 60); }); }
+    return [Math.max(0, a), Math.min(1440, z)];
+  };
+  A.timelineHtml = (d, ppm, a, withSub) => {
+    const blocks = dayBlocks(d).map((b) => { const [lo, hi] = blockSpan(b, d); return { b, lo, hi: Math.max(hi, lo + 24 / ppm) }; }).sort((x, y) => x.lo - y.lo || C.compareBlocks(x.b, y.b));
+    let group = [], until = -1, html = '';
+    const flush = () => {
+      const lanes = [];
+      group.forEach((x) => { let lane = lanes.findIndex((end) => end <= x.lo); if (lane < 0) lane = lanes.length; lanes[lane] = x.hi; x.lane = lane; });
+      group.forEach((x) => { html += blkHtml(x.b, d, ppm, a, withSub, x.lane, lanes.length); }); group = [];
+    };
+    blocks.forEach((x) => { if (x.lo >= until) { flush(); until = -1; } group.push(x); until = Math.max(until, x.hi); }); flush(); return html;
+  };
 
   /* ---------- 渲染框架 ---------- */
   const TABS = [['today', '今天', 'today'], ['plan', '计划', 'plan'], ['life', '领域', 'life'], ['review', '回顾', 'review']];
   A.render = () => {
+    const zone = C.timeZone();
+    if (A._renderZone && A._renderZone !== zone) { A.viewDay = null; A.weekOff = 0; }
+    A._renderZone = zone; C.initTimeZones(A.st);
     C.sweepMissed(A.st, now()); A.applyGlass();
-    { const t = now(); let need = 0; if (A.tab === 'plan') need = C.addDays(C.weekStart(C.addDays(C.weekStart(t), (A.weekOff || 0) * 7)), 7); else if (A.tab === 'today' && A.viewDay != null) need = A.viewDay + DAY; if (need && C.ensureHorizon(A.st, need, t)) C.save(A.st); }
+    { const t = now(); let need = 0; if (A.tab === 'plan') need = C.addDays(C.weekStart(C.addDays(C.weekStart(t), (A.weekOff || 0) * 7)), 7); else if (A.tab === 'today' && A.viewDay != null) need = C.addDays(A.viewDay, 1); if (need && C.ensureHorizon(A.st, need, t)) C.save(A.st); }
     document.body.classList.toggle('nocap', A.tab === 'review');
     $('#nav').innerHTML = '<div class="brand">时序<small>CHRONO</small></div>' + TABS.map(([k, n, i]) => '<button data-act="tab" data-v="' + k + '" ' + (A.tab === k ? 'aria-current="page"' : '') + '>' + ICON[i] + '<span>' + n + '</span></button>').join('');
     const R = { today: A.viewToday, plan: A.viewPlan, life: A.viewLife, review: A.viewReview }[A.tab];
@@ -150,11 +173,13 @@
 
   /* ================= 今天 ================= */
   const hmm = (ts) => C.fmtT(ts);
-  function blkHtml(b, d0, ppm, startMin, withSub) {
-    const dom = DOMAINS[b.domain] || DOMAINS.work, top = ((b.start - d0) / MIN - startMin) * ppm, h = Math.max(((b.end - b.start) / MIN) * ppm - 2, 22);
+  function blkHtml(b, d0, ppm, startMin, withSub, lane = 0, lanes = 1) {
+    const [lo, hi] = blockSpan(b, d0);
+    const dom = DOMAINS[b.domain] || DOMAINS.work, top = (lo - startMin) * ppm, h = Math.max((hi - lo) * ppm - 2, 22);
     const cls = ['blk', b.kind, b.done ? 'done' : '', b.missed && !b.done ? 'missed' : '', b.locked && b.kind !== 'commit' ? 'locked' : '', (b.start <= now() && now() < b.end && !b.done) ? 'now-on' : ''].join(' ');
     const bg = b.kind === 'focus' ? 'background:' + dom.color : b.kind === 'commit' ? '' : 'background:' + tint(dom.color, 0.17);
-    return '<button class="' + cls + '" data-act="blk" data-id="' + b.id + '" data-d="' + d0 + '" style="--c:' + dom.color + ';--pw:' + pw(b.prio == null ? 2 : b.prio) + 'px;top:' + top + 'px;height:' + h + 'px;' + bg + '">' +
+    const position = lanes > 1 ? 'left:calc(' + (lane * 100 / lanes) + '% + 3px);right:auto;width:calc(' + (100 / lanes) + '% - 6px);' : '';
+    return '<button class="' + cls + '" title="' + esc(b.title + ' · ' + C.dayLabel(b.start, now()) + ' ' + hmm(b.start) + '–' + C.dayLabel(b.end, b.start) + ' ' + hmm(b.end)) + '" data-act="blk" data-id="' + b.id + '" data-d="' + d0 + '" style="--c:' + dom.color + ';--pw:' + pw(b.prio == null ? 2 : b.prio) + 'px;top:' + top + 'px;height:' + h + 'px;' + position + bg + '">' +
       '<span class="t">' + (b.done ? '✓ ' : '') + esc(b.title) + '</span>' + (withSub && h > 40 ? '<span class="s">' + hmm(b.start) + '–' + hmm(b.end) + ' · ' + dom.name + '</span>' : '') + (b.kind !== 'commit' && !b.done && h >= 34 ? '<i class="rz" aria-hidden="true"></i>' : '') + '</button>';
   }
   A.blkHtml = blkHtml;
@@ -306,9 +331,9 @@
         : '<div class="small muted" style="margin-top:8px">' + (c.state === 'ok' ? '✓ 已确认' : '已放进收件箱') + '</div>') + '</div>';
   }
   const p2 = C.p2;
-  const dateVal = (ts) => { const d = new Date(ts); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); };
-  const timeVal = (ts) => { const d = new Date(ts); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
-  const parseDateVal = (v) => { const [y, m, d] = v.split('-').map(Number); return new Date(y, m - 1, d).getTime(); };
+  const dateVal = (ts) => { const d = C.date(ts); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()); };
+  const timeVal = (ts) => { const d = C.date(ts); return p2(d.getHours()) + ':' + p2(d.getMinutes()); };
+  const parseDateVal = (v) => C.parseDateTime(v);
   A.dateVal = dateVal; A.timeVal = timeVal; A.parseDateVal = parseDateVal;
 
   A.drawReceipt = () => {
@@ -333,7 +358,7 @@
       else if (v === 'wk') { d.due = C.addDays(ws, 7) - 1; }
       else if (v === 'nx') { d.notBefore = C.addDays(ws, 7); d.due = C.addDays(ws, 14) - 1; }
       else if (v === 'we') { d.notBefore = C.addDays(ws, 5); d.due = C.addDays(ws, 7) - 1; }
-      else { d.due = C.addDays(t0, +v) + DAY - 1; if (v === '0') d.notBefore = t0; }
+      else { d.due = C.dayEnd(C.addDays(t0, +v)); if (v === '0') d.notBefore = t0; }
     }
     c.edits++; c.field = null;
   };
@@ -382,7 +407,7 @@
   };
   A.releaseSheet = (d) => {
     d = +d; const st = A.st, t = now();
-    const bl = st.blocks.filter((b) => b.start >= d && b.start < d + DAY && !b.skipped && b.itemId && b.kind !== 'commit' && !b.locked && !b.done && b.end > t)
+    const bl = st.blocks.filter((b) => b.start >= d && b.start < C.addDays(d, 1) && !b.skipped && b.itemId && b.kind !== 'commit' && !b.locked && !b.done && b.end > t)
       .sort((a, b) => (b.prio - a.prio) || (C.bmin(b) - C.bmin(a)));
     const un = A.unplaced().filter((i) => i.due && C.dayStart(i.due) === d);
     A.sheet('<h3>' + C.WD[C.dow(d)] + '的释放方案</h3><div class="lead">挑几件挪到别的天,或直接放掉。越早做减法越轻松。</div>' +

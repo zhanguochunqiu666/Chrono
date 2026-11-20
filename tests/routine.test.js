@@ -81,9 +81,11 @@ const stL = C.fresh(), nowL = d(2026, 11, 16, 8, 12); const hl = C.parse('每周
 const wkB = C.addDays(C.weekStart(nowL), 21); C.ensureHorizon(stL, C.addDays(wkB, 7), nowL);
 const inWk = () => stL.blocks.filter((b) => b.habitId === hl.id && !b.skipped && C.weekStart(b.start) === wkB);
 const victim = inWk()[0], newStart = C.addDays(C.dayStart(victim.start), 1) + 18 * 3600e3;
+const legacyDuplicate = { ...victim, id: 'legacy-duplicate' };
 victim.start = newStart; victim.end = newStart + 3600e3; victim.hkey = victim.hkey + 'm'; victim.locked = true;          // 旧版 moveBlock 留下的样子
 C.ensureHorizon(stL, C.addDays(wkB, 7), nowL);
-ok(inWk().length === 4, '【复现】旧数据在翻周后,原位置被补出重复块(同周 ' + inWk().length + ' 个,应为 3)');
+ok(inWk().length === 3, '旧版拖动记录在翻周时直接修复,不再补出重复块');
+stL.blocks.push(legacyDuplicate);
 ok(C.repairMoved(stL) >= 1 && inWk().length === 3 && inWk().some((b) => b.id === victim.id && b.start === newStart), '启动修复:去掉重复块,拖过的块留在新位置');
 C.ensureHorizon(stL, C.addDays(wkB, 14), nowL); C.plan(stL, nowL, 'inc'); ok(inWk().length === 3 && inWk().some((b) => b.id === victim.id && b.start === newStart), '修复后再翻周、再重排都稳定');
 console.log('\n固定周程测试通过:' + n);
